@@ -44,6 +44,7 @@ LEAM's levels — work in this order:
 
 | Path | What |
 |---|---|
+| `app/` | **The dashboard app** (runs on the edge device): FastAPI + MQTT bridge (`server/`), pages in `static/` — `index.html` (IR primary, RGB inset, metrics, flow/PA controls) and `monitor.html` (IR, all topics, live graphs). IR shown raw, unprocessed. Device port 18081 |
 | `tools/mqtt/` | `probe.py` (who's talking, how fast), `record.py` (save telemetry + RGB), `replay.py` (play a recording onto a local broker) |
 | `docs/` | Team knowledge, index in `docs/README.md`: `SOURCE_OF_TRUTH.md`, `mqtt-and-telemetry.md`, `cameras-and-calibration.md`, `control.md`, `edge-deployment.md`, `decisions.md`, `experiments.md` |
 | `.claude/skills/` | Shared agent skills: `experiment`, `fan-out` |

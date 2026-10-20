@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Topics &amp; Graphs</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>DEMEX <span>Topics &amp; Graphs</span></h1>
+  <span id="st-reader" class="pill">reader: …</span>
+  <span class="spacer"></span>
+  <span id="topic-count" class="muted mono"></span>
+  <a href="./">← main view</a>
+</header>
+
+<div class="monitor-grid">
+  <div class="camera" style="aspect-ratio: 4 / 3">
+    <img id="ir" class="main" alt="IR camera">
+    <span id="ir-label" class="label">IR · waiting</span>
+    <span id="ir-empty" class="empty">waiting for IR frames…</span>
+  </div>
+
+  <div class="charts">
+    <div class="panel"><h2>Temperatures °C</h2><div class="chart"><canvas id="c-temp"></canvas></div></div>
+    <div class="panel"><h2>Flow readback %</h2><div class="chart"><canvas id="c-flow"></canvas></div></div>
+    <div class="panel"><h2>Motion</h2><div class="chart"><canvas id="c-motion"></canvas></div></div>
+    <div class="panel"><h2>Cooling / fan %</h2><div class="chart"><canvas id="c-cool"></canvas></div></div>
+    <div class="panel"><h2>Position Z mm</h2><div class="chart"><canvas id="c-z"></canvas></div></div>
+    <div class="panel"><h2>Messages / s per topic</h2><div class="chart"><canvas id="c-rate"></canvas></div></div>
+  </div>
+
+  <section class="panel topics">
+    <h2>All topics (click a row for its latest payload)</h2>
+    <table>
+      <thead><tr><th>Topic</th><th>Messages</th><th>Rate /s</th><th>Last seen</th><th>Size</th></tr></thead>
+      <tbody id="topics"></tbody>
+    </table>
+    <h2 style="margin-top:14px">Latest payload: <span id="payload-topic" class="mono">—</span></h2>
+    <pre class="payload" id="payload">Select a topic.</pre>
+  </section>
+</div>
+
+<script src="vendor/chart.umd.min.js"></script>
+<script src="common.js"></script>
+<script src="monitor.js"></script>
+</body>
+</html>

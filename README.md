@@ -3,7 +3,20 @@
 Real-time extrusion bead-width measurement for LEAM's DEMEX printer, running as a Siemens Industrial Edge app.
 Built at the Siemens × LEAM hackathon, Munich, October 2026.
 
-Status: early — tooling and research. See `CLAUDE.md` for the mission, rules and layout.
+Status: dashboard app working (live IR/RGB, all topics + graphs, flow/pressure-advance requests); width measurement
+next. See `CLAUDE.md` for the mission, rules and layout.
+
+## Dashboard app (`app/`)
+
+```sh
+cd app && uv venv && uv pip install -r requirements.txt
+set -a && . ../.env && set +a                       # broker host/users; passwords can also be entered in the UI
+.venv/bin/uvicorn server.main:app --port 8765       # open http://127.0.0.1:8765 (main) and /monitor.html
+tools/edge/build-app.sh app 0.1.0                    # from the repo root → app/dist/hello-edge_0.1.0.app for the device
+```
+
+On the edge device it listens on port 18081. Passwords are entered once under Settings and kept on the device.
+The command request format is a guess until LEAM shares their schema — the raw-JSON box lets you send any shape.
 
 ## Quickstart
 

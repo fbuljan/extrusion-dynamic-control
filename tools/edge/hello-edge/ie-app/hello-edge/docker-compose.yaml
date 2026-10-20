@@ -1,9 +1,0 @@
-version: '2.4'
-services:
-  hello-edge:
-    image: hello-edge:${APP_VERSION}
-    mem_limit: 128m
-    restart: unless-stopped
-    logging:
-      driver: json-file
-      options: {max-size: "10m", max-file: "3"}

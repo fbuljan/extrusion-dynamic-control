@@ -18,7 +18,7 @@ Dockerfile → image (linux/amd64) → .app (tiap, IECTL or App Publisher) → I
 
 ```sh
 brew install go && go install github.com/thediveo/tiap/cmd/tiap@v0.14.5   # third-party packager, no Siemens login
-tools/edge/build-app.sh tools/edge/hello-edge 0.0.1      # → tools/edge/hello-edge/dist/hello-edge_0.0.1.app (45 MB)
+tools/edge/build-app.sh app 0.1.0      # → app/dist/hello-edge_0.1.0.app (the dashboard; app id of the old hello-world)
 ```
 
 - `build-app.sh` builds the image with `docker buildx --platform linux/amd64 --provenance=false` and packages it with

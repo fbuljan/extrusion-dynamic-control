@@ -1,0 +1,20 @@
+version: '2.4'
+services:
+  hello-edge:
+    image: hello-edge:${APP_VERSION}
+    mem_limit: 512m
+    restart: unless-stopped
+    # Dashboard on the device's own address, reachable without the device UI login.
+    ports:
+      - "18081:8000"
+    # Passwords are entered in the app's settings at runtime and kept here, never in the .app.
+    volumes:
+      - ./cfg-data/:/cfg-data/
+    environment:
+      MQTT_HOST: ${MQTT_HOST}
+      MQTT_PORT: ${MQTT_PORT}
+      MQTT_USER: ${MQTT_USER}
+      MQTT_WRITER_USER: ${MQTT_WRITER_USER}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
