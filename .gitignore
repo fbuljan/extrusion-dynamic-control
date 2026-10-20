@@ -1,0 +1,27 @@
+# Secrets and personal context
+.env
+.env.*
+!.env.example
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Recordings, organiser data, calibration files — local only (public repo; IR must never be stored anywhere)
+data/
+*.tiff
+*.npz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Edge packaging artefacts
+*.app
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
