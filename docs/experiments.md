@@ -34,3 +34,22 @@ compose (version interpolated), image TAR, nginx.json, icon. NOT yet imported in
 once someone downloads it from the IE Hub.
 Verdict: adopt (packaging). Next: import into IEM + install on the device — needs IEM credentials and the
 `appimporter` role from Siemens.
+
+## iem-import | 2026-10-20 | timebox 20 min
+Hypothesis: the management portal accepts a `.app` built with tiap (not the official Siemens tools).
+Pass if: the import task finishes and the app appears in Device Applications.
+Where: portal → Applications → "+ Add application" → `tools/edge/hello-edge/dist/hello-edge_0.0.2.app`
+Result: import task **Finished** in ~45 s; app listed. Portal is IEM 2.3.2 (V2 UI). Our team's device is a SIMATIC IPC
+BX-39A (x86-64, Edge OS 3.3.0, no GPU allocation) in the "Leam" device group, on the same subnet as the MQTT broker.
+Verdict: adopt — tiap output is accepted; no IE Hub login needed for packaging. Next: install on our device and open
+`/hello-edge/` through the device's reverse proxy.
+
+## device-install | 2026-10-20 | timebox 20 min
+Hypothesis: the imported hello-world app installs on our device and is served through the device's reverse proxy.
+Pass if: install job completes and `/hello-edge/` on the device answers.
+Result: install job **Completed** in under a minute; only warning "Application is not signed" (expected). The route
+`/hello-edge/` went from 503 to 401 once the app started — the device's reverse proxy puts apps behind the device UI
+login, which we don't have yet. The device uses a self-signed certificate. Rung 4 reached for install; the page itself
+not yet viewed.
+Verdict: adopt — the full path (build → import → install) works. Next: device UI login from Siemens, then confirm the
+page and test that a container on the device can reach the MQTT broker.

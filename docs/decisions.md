@@ -10,3 +10,4 @@ Newest at the bottom. One row per decision, one line of why. A reversal is a new
 | D4 | 2026-10-20 | Control levers are flow % and pressure advance only (supersedes "nozzle temperature + motor RPM") | The organisers' interface exposes only these two, max 1 correction/s |
 | D5 | 2026-10-20 | No credentials, organiser files or calibration data in git; config via `.env` | The repo is public |
 | D6 | 2026-10-20 | Hackathon mode: thin slice first, timeboxed experiments logged in `docs/experiments.md`, no review ceremony | Speed and learning over rigour |
+| D7 | 2026-10-20 | Everything runs on the edge device in the end: MQTT ingest, width measurement, alerts, dashboard, logging, control | Team lead's goal; it is what the challenge and the sponsor (Industrial Edge) want to see. Laptops are for development and replay only |

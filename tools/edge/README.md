@@ -25,4 +25,6 @@ Copy `hello-edge/` as the starting point for a new app; generate a fresh app id 
   `job batch-create --operation installApplication`.
 - **App Publisher GUI** (macOS build exists, same IE Hub download): import the compose file, pick the image TAR.
 
-Status: a `.app` builds locally. Not yet imported into IEM or run on the device — that's the next rung.
+Status (2026-10-20): the full path works — a tiap-built `.app` imported into our IEM (2.3.2) and installed on our
+device (SIMATIC IPC BX-39A, x86-64, no GPU). Only warning: "Application is not signed". The app's page sits behind
+the device UI login (`/<service>/` answers 401 without it) and the device uses a self-signed certificate.
