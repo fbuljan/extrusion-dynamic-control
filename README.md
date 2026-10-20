@@ -3,7 +3,7 @@
 Real-time extrusion bead-width measurement for LEAM's DEMEX printer, running as a Siemens Industrial Edge app.
 Built at the Siemens × LEAM hackathon, Munich, October 2026.
 
-Status: dashboard app working (live IR/RGB, all topics + graphs, flow/pressure-advance requests); width measurement
+Status: dashboard app working on the edge device (live IR/RGB, all topics + graphs, printer corrections); width measurement
 next. See `CLAUDE.md` for the mission, rules and layout.
 
 ## Dashboard app (`app/`)
@@ -16,7 +16,8 @@ tools/edge/build-app.sh app 0.1.0                    # from the repo root → ap
 ```
 
 On the edge device it listens on port 18081. Passwords are entered once under Settings and kept on the device.
-The command request format is a guess until LEAM shares their schema — the raw-JSON box lets you send any shape.
+Corrections follow LEAM's request schema 0.2.0 (flow, pressure advance, nozzle target, speed override, part-cooling
+fans; see `docs/control.md`) and need `MQTT_CONTROLLER_ID` in `.env`. Only one person should send at a time.
 
 ## Quickstart
 

@@ -64,3 +64,44 @@ nothing secret goes into the shared portal; a broker answer proves the path). Bo
 build baked credentials into the `.app` (rejected — never upload credentials); device log streaming is disabled, so
 logs aren't visible in the portal; the portal's upload dialog froze once although the import had finished.
 Verdict: adopt. Next: give the real app its credentials at install time (IEM app configuration), not in the `.app`.
+
+## dashboard-on-device | 2026-10-20 | timebox 20 min
+Hypothesis: the dashboard app (0.1.0) installs as an update over the hello-world app and serves on the device.
+Pass if: device port 18081 serves both pages.
+Result: **works.** Import ~2 min, update ~1.5 min; `/` and `/monitor.html` served, settings API answers with broker
+host and users preset and no passwords. Live data not yet seen: the broker's reader password changed and we don't
+have the new one. Rung 4 for deploy; live data pending credentials.
+Verdict: adopt. One full deploy cycle costs ~4–5 min, so iterate locally against replays and deploy milestones only.
+
+## deploy-routine | 2026-10-20 | timebox 15 min
+Hypothesis: a written deploy routine (build → no-secrets check → import → update → poll the version) gets a fix onto
+the device in ~5 min, and the app's saved settings survive an update.
+Result: 0.1.1 (version label, readable login-refusal reason, no broken images before the first frame) built, imported
+and running in ~4 min. Settings stored on the device survived the update. The update job was started by someone
+else on the shared IEM login two minutes after the import; check the running version before clicking Update.
+Verdict: adopt. The app now reports its version at `/api/version`, so "what's deployed" is one request.
+
+## dashboard-audit | 2026-10-20 | timebox 30 min
+Hypothesis: what the dashboard shows matches the live MQTT data exactly and honours the guide's freshness/validity rules.
+How: three read-only audit agents compared raw broker messages with what the device app sent to browsers (60–75 s
+captures; IR handled in memory only).
+Result: every displayed number matched the raw data (250/250 updates), images were never swapped or dropped. Defects
+found and fixed in 0.1.2: values stayed on screen ~220 s after an outage (now blanked within 1 s, gateway shows "no
+data"); previous-layer temperature and cooling ignored their source's `valid`; camera "fresh" ignored each frame's own
+lease and true age (IR arrives ~0.85 s old; label now shows the age); a slow browser could get a backlog of old frames;
+graphs drew lines across gaps; browsers kept old scripts after a deploy (now `Cache-Control: no-cache`). Added nozzle and
+bed temperature (new in telemetry, refreshed every ~1.4 s). Not changed: an image from the previous trailing camera
+stays visible (labelled with its camera) after a camera switch — the guide allows labelled held frames.
+Verdict: adopt. 0.1.2 live on the device 14:37, verified on live data.
+
+## writer-contract | 2026-10-20 | timebox 45 min
+Hypothesis: building requests exactly like LEAM's command guide (schema 0.2.0, reference helper) makes them admissible.
+Result: our first guessed request (flow 150, sent by the team lead at 14:15) was rejected `invalid_request_shape_or_size`.
+Rebuilt `make_request` from the guide; against a fake gateway on the local broker that checks the exact key set, ranges,
+session, sequence and expiry, all five operations were accepted, and the app refused out-of-range values, a closed gate,
+stale status and >1/s. 0.1.3 on the device builds a valid live request from LEAM's status (not sent). Rung 3 for sending;
+no live command sent with the new format yet.
+Verdict: adopt. Next: one no-op live request (flow 100 while at 100) with the team lead's OK to confirm the round trip.
+Update 15:03: first live round trip — flow 140 sent by the team lead from the device app (0.1.3) → `accepted` →
+`setting_confirmed`, observed 140; telemetry `extrusion_percent` 140.0 within seconds. Rung 4 for sending.
+0.1.4–0.1.5 add refused attempts to the command log, a "now" readback per control, and sliders that follow the live value.

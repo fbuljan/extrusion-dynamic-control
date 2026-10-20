@@ -1,32 +1,106 @@
 # Control: Correct (Level 2) and Adapt (Level 3)
 
-In plain words: we can change only two printer settings, the flow multiplier and pressure advance, at most once per
-second between them. Flow is the real width lever. Pressure advance only matters at corners and probably pauses the
-print every time it changes, so we touch it rarely. Between sending a command and seeing its effect in the camera
-there are several seconds of delay, so a normal fast controller would oscillate; the design below waits for the effect
-before acting again. **Nothing is sent to the printer without the team lead's explicit OK**; the default is advisory
-mode (show the recommendation, don't send it). The command path is not live yet.
+In plain words: we can change five printer settings, not two: the flow multiplier, pressure advance, the nozzle
+temperature target, the speed override and the part-cooling fans. Together they share one limit of at most one accepted
+change per second, across all senders. Flow is the real width lever. Pressure advance only matters at corners and
+probably pauses the print every time it changes, so we touch it rarely. Between sending a command and seeing its effect
+in the camera there are several seconds of delay, so a normal fast controller would oscillate; the design below waits
+for the effect before acting again. **Nothing is sent to the printer without the team lead's explicit OK**; the default
+is advisory mode (show the recommendation, don't send it). The writer account works and the request format is known
+(LEAM's command guide, 20 Oct), but commands only take effect while LEAM's operator has native DEMEX in RUN. Our first
+request, a guess made before we had the schema, was rejected with `invalid_request_shape_or_size` (measured).
 
-Tags: **organiser** = from the organisers' slides or mail; **measured** = live data; **estimate** / **sim** = our
-reasoning or toy simulations (numbers show behaviour, not real performance).
+Tags: **organiser** = from the organisers' slides, mail or LEAM's command guide (20 Oct); **measured** = live data;
+**estimate** / **sim** = our reasoning or toy simulations (numbers show behaviour, not real performance).
 
 ## Levers (organiser)
 
-| Setting | Range | What it does |
-|---|---|---|
-| `flow_percent` | 0–200 %, absolute value | Extrusion multiplier; scales material per mm of travel. Probably sent to the Duet as `M221` (estimate) |
-| `pressure_advance_seconds` | 0–1 s, absolute value | Extra extruder motion proportional to extruder acceleration; fixes bulges/gaps at corners, starts and stops. Probably `M572` (estimate) |
-| Rate limit | **max 1 correction per second across both settings** | Feedback: a request result plus a readback of the setting in force; the physical effect is ours to measure |
+| Setting (`operation`) | Range, absolute value | Required state | What it does |
+|---|---|---|---|
+| `flow_percent` | 0–200 % (100 = normal, not a factor of 1.0) | RUN | Extrusion multiplier; scales material per mm of travel. Probably sent to the Duet as `M221` (estimate) |
+| `pressure_advance_seconds` | 0–1 s | RUN | Extra extruder motion proportional to extruder acceleration; fixes bulges/gaps at corners, starts and stops. Probably `M572` (estimate) |
+| `nozzle_temperature_c` | 190–250 °C | RUN | Active nozzle target only; standby and heater mode are unchanged, so an inactive heater is not switched on. Confirmation means the target was set, not that the nozzle reached it |
+| `speed_override_percent` | 10–200 %, rounded to whole % | RUN, Motion PI disabled | Speed override |
+| `fan_speed_percent` | 0–100 %, rounded to 0.1 % | RUN, Cooling PI disabled | Both print fans |
+| Rate limit | **max 1 accepted request per second, shared by all five operations and all senders** | | Feedback: a request result plus a readback of the setting in force; the physical effect is ours to measure |
 
-- Sent with a **separate writer account** (not issued yet) to `demex/hackathon/mini/extrusion/request`. Payload schema,
-  readback topic and what happens above the rate limit are unknown.
-- **Not controllable:** nozzle temperature, extruder motor RPM, print speed. The organisers said acceleration or speed
-  might be opened later.
-- **Status (measured, all of 2026-10-20 so far):** gateway `state = "SAFE"`, `permits_outputs = false`,
-  `command_gate_closed = true`. The organisers' slides said the command route was implemented but target activation and
-  rehearsal were pending.
+- Sent with the **separate writer account** to `demex/hackathon/mini/extrusion/request`, schema `0.2.0`; contract in
+  the next section. The guide does not say how a request above the rate limit is answered.
+- **Not writable (guide):** bed temperature and the bed and hotend fan stay read-only; no raw G-code, no extra fields.
+  Extruder motor RPM and acceleration are not among the five operations (the organisers said earlier that acceleration
+  might be opened later; the guide does not offer it).
+- Our reading of the new levers (estimate, untested): speed override also changes material per mm at a given flow, so
+  it may be a second, fast width lever; nozzle target and fans act on melt temperature and cooling, so they are
+  probably slow. Level 2 below uses flow only.
+- **Status (measured):** gateway `state = "SAFE"`, `permits_outputs = false`, `command_gate_closed = true` through the
+  morning, `RUN` seen at ~13:30 (`mqtt-and-telemetry.md`). The writer-side status carries `normal_authorized`; requests
+  need it `true`, and only LEAM's operator can enter native RUN (MQTT cannot).
 - LEAM's process service has its own speed controller (`pid_state.speed_substrate`, output 50–200 %), currently
-  disabled. If it runs, speed changes under us: read `speed_override_percent` every cycle.
+  disabled. If it runs, speed changes under us: read `speed_override_percent` every cycle. The guide requires Motion PI
+  (for speed) and Cooling PI (for fans) to be disabled in native DEMEX and left disabled while we control that output;
+  that Motion PI is this `speed_substrate` controller is our guess (estimate).
+
+## Request contract (schema 0.2.0)
+
+From LEAM's command guide (20 Oct); the guide's own wording wins over this summary. LEAM must have installed its "Mini
+event controls update" on the gateway; the earlier temperature-only MQTT update does not enable these operations.
+
+- **Connection:** writer account (separate from our reader, which we still need for monitoring), MQTT 3.1.1, QoS 0,
+  `retain=false`, clean session, unique client ID. Credentials from `.env` or the operator, never in shared code.
+- **Topics:** publish `demex/hackathon/mini/extrusion/request`; subscribe to `.../extrusion/result` (outcomes) and
+  `.../extrusion/status` (gateway session, gate, sequence) **before** publishing. Results and status stay schema
+  `0.1.0` even for 0.2.0 requests.
+
+| Request field | Value |
+|---|---|
+| `schema_version` | `"0.2.0"` |
+| `gateway_session_id` | from the latest fresh status; changes when the gateway restarts, never hard-code |
+| `controller_id` | the controller ID LEAM configured (env var `MQTT_CONTROLLER_ID`); the status must name the same ID |
+| `request_id` | new UUID for every request |
+| `sequence` | greater than `highest_admitted_sequence` in the fresh status **and** than our own last sent sequence |
+| `issued_utc_ms`, `expires_utc_ms` | derived from the status (below) |
+| `extruder_index` | `0` for every operation, including fans and nozzle |
+| `correction` | `{"operation": <name>, "value": <number>}`: one operation per request, value a JSON number, no extra fields |
+
+**Sequence and expiry, as in the guide's helper:** `sequence = max(highest_admitted_sequence, last sent) + 1`;
+`issued_utc_ms` = the status's `published_utc_ms`; `expires_utc_ms = min(published_utc_ms + 1500, status expires_utc_ms)`.
+The helper uses the gateway's own publication time plus local elapsed time (`time.monotonic()` since the status
+arrived), so PC and gateway clocks need not agree to the sub-second. Never extend the gateway's expiry or extrapolate
+its wall clock. It refuses to build a request unless the status is schema `0.1.0`, names our controller, has
+`normal_authorized` true, has a validity window (`expires − published`) above 0 and at most 2000 ms, and is younger
+than 1500 ms and than that window. The gateway checks actual arrival time, session, bounds and PI ownership again, so
+network delay can still cause a rejection. The helper does not do the shared 1 Hz scheduling or result handling.
+
+**Results:** match by `request_id`, `gateway_session_id`, `controller_id` and `sequence`. Other senders share the
+controller's sequence and rate limit, so the result topic can contain their outcomes too.
+
+| `state` | Meaning | What we do |
+|---|---|---|
+| `accepted` | Envelope admitted; device checks and write still pending | Wait for the final result. Not success |
+| `setting_confirmed` | Fresh matching Duet setting readback | Read `observation.observed_value` and `observation.setting_confirmed` |
+| `queued_unconfirmed` | Queued but not confirmed | Inspect the readback; do not repeat automatically |
+| `dispatch_unknown` | Delivery or ordering uncertain | Inspect the readback; do not repeat automatically |
+| `rejected` | Refused | Read `reason`, correct the cause, then send a new deliberate request |
+
+Rules from the guide:
+- **One sender.** All clients share the controller's sequence and the 1 Hz limit; coordinate with LEAM and anyone using
+  its command-line sender. Space requests by at least 1 s across all five operations, not per operation.
+- **No automatic retries.** Publish each request exactly once; never retry `dispatch_unknown` or a missing result
+  automatically; after a rejection or error take fresh status and inspect the outcome first. Do not retain, backlog or
+  replay requests after a reconnect.
+- **`accepted` is not confirmed.** A missing result after several seconds is unknown, neither success nor proof that
+  nothing changed. `physical_extrusion_response: "not_measured"` is a legacy field on every operation.
+- **What confirmation proves.** Nozzle: the active target was read back, not that the temperature was reached. Fans:
+  the requested percentage after rounding (`observed_value`); it does not prove the fans turn, and monitored fan PWM
+  may differ because of controller scaling.
+- **State.** RUN is entered only by LEAM's operator in native DEMEX. Without a request there is no write. A disconnect
+  does not reset the settings (so a baseline has to be sent explicitly, our reading). Native STOP prevents new
+  commands, keeps nozzle and speed settings and applies the existing Mini fan-off behaviour.
+- **Our Level 2 design below predates the guide:** its writer thread "resends once", which has to be reconciled with the
+  no-automatic-retry rule before any live loop.
+
+Our app builds requests with `make_request` in `app/server/bridge.py` (it follows the guide's helper and keeps the
+approved ranges in `OPERATIONS`; the controller ID comes from `MQTT_CONTROLLER_ID`).
 
 ## Latency and dead time (estimates until the step test)
 
@@ -121,7 +195,7 @@ class CornerLearner:                              # table persisted per program 
 - Fallback if timing cannot be made reliable: report the corner bulge map and a recommended PA value.
 - Needs repeated geometry: ask the organisers for the test-print G-code (corner positions, layer count).
 
-## First on-site test: flow step (10 min, needs the organisers' OK and the writer account)
+## First on-site test: flow step (10 min, needs the organisers' OK and native RUN set by their operator)
 
 1. Print a straight of ≥ 100 mm at nominal flow. Record (`tools/mqtt/record.py`).
 2. At a logged time, command flow 100 → 115 %. Hold 20 s. Command 115 → 100 %.
@@ -134,12 +208,13 @@ class CornerLearner:                              # table persisted per program 
 
 - **Nothing is sent without the team lead's explicit go-ahead.** Default mode is advisory: show "recommend flow 104 %,
   PA unchanged" with reason and confidence.
-- Hold (send nothing) when: `gateway.state != "RUN"`, `permits_outputs` false, `command_gate_closed` true, telemetry
-  expired, camera pair changing, low confidence, readback ≠ request for > 3 s, or a large error persists > 5 s (more
+- Hold (send nothing) when: `gateway.state != "RUN"`, `permits_outputs` false, `command_gate_closed` true, writer
+  status not fresh or `normal_authorized` not true, telemetry expired, camera pair changing, low confidence, readback ≠ request for > 3 s, or a large error persists > 5 s (more
   likely a measurement problem: alarm instead of pushing flow).
 - Hard limits: baseline ±15 % flow, ≤ 5 % per step, ≥ 2 s spacing, PA frozen in Level 2.
-- A STOP control sends the baseline and switches to advisory. On clean shutdown send the baseline; ask whether the
-  writer account may set an MQTT last-will.
+- A STOP control sends the baseline and switches to advisory. On clean shutdown send the baseline: the guide says a
+  disconnect does not reset the settings. An MQTT last-will would probably not work (estimate): a request needs a
+  session ID and an expiry (at most 1.5 s) taken from fresh status, which a pre-built payload cannot have.
 - First automatic run only on a sacrificial single-layer straight. Rehearse STOP. Log every request, readback and gate
   decision (RGB and scalars only).
 - Do not change machine networking or start prints; the organisers operate the printer.

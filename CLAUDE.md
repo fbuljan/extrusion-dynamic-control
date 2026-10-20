@@ -25,8 +25,10 @@ LEAM's levels — work in this order:
   each, and the physical camera behind it follows the travel direction — read `camera_index` every frame. (Before
   that, camera 3's `ahead`/`trailing` labels looked swapped; recheck against images in the new mode.)
 - Flow readback is live in telemetry (`duet_readback.payload.extrusion_percent`, honour `extrusion_valid`).
-- The only writable levers are **flow % (0–200)** and **pressure advance (0–1 s)**, max one correction per second,
-  through a separate writer account. Nozzle temperature and motor speed are **not** controllable.
+- Writable through the writer account (request schema 0.2.0, LEAM command guide 20 Oct): **flow % (0–200)**,
+  **pressure advance (0–1 s)**, **nozzle target (190–250 °C)**, **speed override (10–200 %)**, **part-cooling fans
+  (0–100 %)**. One accepted request per second shared by all operations and all senders; only while LEAM's operator has
+  native DEMEX in RUN; speed needs Motion PI and fans need Cooling PI disabled there. Bed and hotend fan are read-only.
 - Subscribe to `demex/demo/mini/#` or the exact topics in `tools/mqtt/common.py` (`demex/#` is refused).
 - Apps on the edge device reach the broker directly; a published container port is reachable from the event network
   without the device login (verified with `tools/edge/mqtt-probe`, port 18080).
@@ -58,5 +60,6 @@ LEAM's levels — work in this order:
   logged in `docs/experiments.md`. A written-down failure is progress.
 - **Prove on real data** and name the highest rung reached: 1 recorded frames offline · 2 live broker, read-only ·
   3 container locally · 4 `.app` on the edge device.
+- **Iterate locally, deploy at milestones:** one device deploy takes ~4–5 min, a local reload seconds (D8).
 - **Decisions** that affect others go in `docs/decisions.md`, one line of why.
 - Small commits, Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`), pull before you push.

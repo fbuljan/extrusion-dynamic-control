@@ -42,9 +42,14 @@
 - **Cameras:** telemetry names an `ahead` and a `trailing` camera; derived azimuth of index k ≈ (315 + 90k)°.
   **[OPEN]** for camera 3, `trailing` frames show the area ahead of the nozzle and `ahead` frames show the fresh bead:
   pick frames by **travel direction + image evidence**.
-- **Levers:** only **`flow_percent` (0–200 %)** and **`pressure_advance_seconds` (0–1 s)**, absolute, **≤ 1 correction/s
-  across both**, via a separate writer account (not issued yet). **Nozzle temperature and motor RPM are not writable.**
-  The output gate was `SAFE` all day: no commands possible yet.
+- **Levers** [CONFIRMED, LEAM's command guide of 20 Oct]: five operations, absolute values, via a separate writer account
+  with request schema 0.2.0: **`flow_percent` (0–200 %)**, **`pressure_advance_seconds` (0–1 s)**,
+  **`nozzle_temperature_c` (190–250 °C, target only)**, **`speed_override_percent` (10–200 %)**,
+  **`fan_speed_percent` (0–100 %)**. **≤ 1 accepted request/s, shared across all five and all senders.** All need native
+  DEMEX in RUN, which only LEAM's operator can set; speed and fans also need the Motion / Cooling PI disabled there.
+  Bed temperature and the bed and hotend fan are read-only; motor RPM is not among the operations. The writer account
+  works; our first, guessed request was rejected (`invalid_request_shape_or_size`) before we had the schema [MEASURED].
+  The gate was `SAFE` all morning, `RUN` seen ~13:30 [MEASURED]. Contract: `control.md`.
 - **IR:** 160×120, ~0.6 mm/px. **Never persist IR images** (organiser rule). Fresh-material gate at most.
 - **Platform:** Docker → `.app` (`tools/edge/build-app.sh`, tiap) → IEM 2.3.2 (V2) → our device, a SIMATIC IPC BX-39A.
   **A hello-world `.app` imported and installed (~13:00).** Open: a device UI login (the app's page answers 401) and
@@ -79,7 +84,7 @@
 | Level | Name | Build | Evidence | Status (day 1) |
 |---|---|---|---|---|
 | 1 | **Measure** | width in mm with a confidence value | error against an independent reference measurement | Bead found and measured offline on rec1; no live app, no reference yet |
-| 2 | **Correct** | gradual feedback on extrusion flow | smaller width error, **no oscillation** | Designed (`control.md`); blocked: gate SAFE, no writer account |
+| 2 | **Correct** | gradual feedback on extrusion flow | smaller width error, **no oscillation** | Designed (`control.md`); writer account and request schema known; open: permission and a time slot to actuate |
 | 3 | **Adapt** (stretch) | learn the extrusion dynamics at recurring corners | improvement on later, comparable corners | Designed (`control.md`) |
 
 Data collection is part of every level: log widths, telemetry and RGB frames (allowed) for validation, step tests and
@@ -153,17 +158,31 @@ is a width.
 
 ## 5. Controllable and measurable parameters
 
-### 5.1 Levers [CONFIRMED]
-`flow_percent` 0–200 % and `pressure_advance_seconds` 0–1 s, absolute, ≤ 1 correction/s across both, separate writer
-account, command topic `demex/hackathon/mini/extrusion/request` (payload schema unknown). Flow is the width lever
-(estimated actuation delay 0.4–1.2 s plus camera transport). A pressure-advance change probably pauses motion
-[ASSUMPTION from firmware source]: use rarely. Nozzle temperature, motor RPM and speed are **not** writable. Room
-temperature: not available. Design and safety: `control.md`.
+### 5.1 Levers [CONFIRMED, LEAM's command guide of 20 Oct]
+Five operations on `demex/hackathon/mini/extrusion/request`, request schema `0.2.0` (results and status stay `0.1.0`),
+absolute values, separate writer account, **≤ 1 accepted request/s shared across all five operations and all senders**:
+
+| Operation | Range | Required state |
+|---|---|---|
+| `flow_percent` | 0–200 % (100 = normal) | RUN |
+| `pressure_advance_seconds` | 0–1 s | RUN |
+| `nozzle_temperature_c` | 190–250 °C; active target only, standby and heater mode unchanged | RUN |
+| `speed_override_percent` | 10–200 %, rounded to whole % | RUN, Motion PI disabled |
+| `fan_speed_percent` | 0–100 %, both print fans, rounded to 0.1 % | RUN, Cooling PI disabled |
+
+RUN is entered only by LEAM's operator in native DEMEX; MQTT cannot do it. `accepted` is not confirmation; nozzle
+confirmation means the target was set, not reached. Never auto-retry. The writer account works; our first, guessed
+request was rejected with `invalid_request_shape_or_size` [MEASURED]. Flow is the width lever (estimated actuation delay
+0.4–1.2 s plus camera transport) [ASSUMPTION]. A pressure-advance change probably pauses motion [ASSUMPTION from
+firmware source]: use rarely. The effect of nozzle target, speed override and fans on width is untested [OPEN]. Not
+writable: bed temperature, bed and hotend fan; motor RPM is not offered. Room temperature: not available. Request
+contract, design and safety: `control.md`.
 
 ### 5.2 Telemetry [MEASURED]
 Position (mm, ~4.6 Hz content), commanded speed and override, extrusion state, travel direction, camera pair,
-IR-derived temperatures (only when the inner `valid` is true), output gate. **Not present:** nozzle temperature, RPM,
-pressure, layer number, room temperature, flow/PA readback, any width. Field paths and what not to use:
+IR-derived temperatures (only when the inner `valid` is true), output gate, nozzle and bed temperature with targets and
+flow multiplier readback (`duet_readback`, refreshed every ~1.4 s). **Not present:** RPM, pressure, layer number, room
+temperature, PA readback, any width. Field paths and what not to use:
 `mqtt-and-telemetry.md`.
 
 ---
@@ -183,7 +202,7 @@ pressure, layer number, room temperature, flow/PA readback, any width. Field pat
 ```
 [cameras + Duet/gateway] → MQTT broker (printer network, read-only) → [edge device: our .app]
   telemetry + RGB → frame gate → width (H + scale fix) + confidence → flags → log → UI (reverse proxy)
-  → (L2/L3) controller → writer account → flow_percent / PA (≤ 1/s) → gateway  [only in RUN, with team lead OK]
+  → (L2/L3) controller → writer account → request, 5 operations (≤ 1/s) → gateway  [only in RUN, with team lead OK]
 ```
 
 ---
@@ -224,7 +243,8 @@ pressure, layer number, room temperature, flow/PA readback, any width. Field pat
 
 ## 9. Decisions
 Canonical log: `decisions.md` (D1 measure first · D2 measurement is the foundation · D3 MQTT + Industrial Edge `.app` ·
-D4 levers are flow % and pressure advance only · D5 nothing secret in git · D6 hackathon mode).
+D4 levers are flow % and pressure advance only, superseded by D9: five writable operations, schema 0.2.0 · D5 nothing
+secret in git · D6 hackathon mode).
 **Proposed, awaiting the team lead:** frame selection by direction + image evidence; homography + pitch scale fix until
 coupons exist; app subscribes to telemetry + RGB only; advisory by default, PA rarely; output a width profile along the
 path.
@@ -241,7 +261,7 @@ path.
 | Homography bias 4–11 % near the nozzle | Pitch self-calibration, then reference coupons |
 | Glare, LED, neighbouring lines | Saturation gate, blue channel, width prior, nozzle anchor, method agreement |
 | RGB stops when the organisers' viewer closes | Freshness monitor; ask |
-| Command gate SAFE; PA pauses the print | Advisory mode; flow only |
+| Command gate closed unless LEAM's operator sets RUN; PA probably pauses the print (estimate); other senders share the 1/s limit | Advisory mode; flow only; one sender; no auto-retry |
 | No device UI login; container → broker untested | Ask Siemens; probe container on the device; plain-Docker Plan B |
 | IR stored by accident | App doesn't subscribe to IR; no payload logging |
 | Telemetry glitches, transient camera flips | Pair-stability gate; direction from position |
@@ -252,7 +272,8 @@ path.
 ## 11. Open questions (the team lead keeps the prioritised list for the organisers)
 
 Answered since v1: camera transport (MQTT JSON + base64 JPEG), telemetry contents, levers, camera index mapping and
-selection rule, RGB scale, the rig vs the real machine.
+selection rule, RGB scale, the rig vs the real machine; commands (writer account, request schema 0.2.0, result and
+status topics, five operations; from LEAM's command guide, 20 Oct).
 
 Still open:
 - **Cameras:** what `ahead`/`trailing` mean for RGB (camera-3 swap); why index 1 never streams RGB; can both cameras of a
@@ -261,8 +282,9 @@ Still open:
   precision goal; bead width or wall thickness.
 - **Reference:** printed samples with known widths and a caliper/microscope on site; how "reference error" is judged;
   calibration board height vs nozzle tip; IR calibration status.
-- **Commands:** writer account, payload schema, readback topic, SAFE → RUN, permission to actuate, does a PA change
-  pause the print, firmware version, nozzle → camera-view distance.
+- **Commands:** permission and a time slot to actuate (RUN is set by LEAM's operator), does a PA change pause the
+  print, firmware version, nozzle → camera-view distance. How requests above the 1/s limit are answered is not stated
+  in the guide.
 - **Telemetry:** unit of `extrusion_speed`; meaning of `controls.healthy=false`; layer number; room temperature.
 - **Edge:** device UI login, container → broker reachability, NTP, laptop access to the device's reverse proxy.
 
@@ -275,7 +297,7 @@ Still open:
 | `README.md` | Index of `docs/` |
 | `mqtt-and-telemetry.md` | Topics, schemas, measured rates, camera index/azimuth/role, timing, handling checklist |
 | `cameras-and-calibration.md` | What the frames show, frame selection, calibration usage, scale fix, accuracy budget, pipeline, proven vs not |
-| `control.md` | Levers, latency, Level 2 controller, Level 3 corner learner, step test, safety |
+| `control.md` | Levers, request contract (schema 0.2.0), latency, Level 2 controller, Level 3 corner learner, step test, safety |
 | `edge-deployment.md` | Build a `.app`, compose rules, upload/install, IECTL, networking, debugging, what's still missing |
 | `decisions.md`, `experiments.md` | Team decision log and experiment log |
 | `../CLAUDE.md` | Mission, hard rules, layout, ways of working |
@@ -301,3 +323,5 @@ Organiser documents, calibration files, recordings and the raw research notes st
   with homography and near-nozzle correction; levers = flow and pressure advance; LEAM's three levels; telemetry and
   camera selection from live data; camera-3 conflict; first widths and accuracy budget; hello-world `.app` installed on
   our device.
+- **v2 + command guide (2026-10-20, later):** levers corrected from two to five writable operations, writer account and
+  request schema 0.2.0 now known, from LEAM's command guide (details in `control.md`).

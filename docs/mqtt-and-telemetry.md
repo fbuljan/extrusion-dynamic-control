@@ -1,7 +1,8 @@
 # MQTT and telemetry
 
 Everything the app needs arrives on one MQTT broker on the printer's network: a telemetry snapshot about 14 times a
-second, plus camera previews (JPEG inside JSON). We can read, not write.
+second, plus camera previews (JPEG inside JSON). Our reader account can only read; corrections would go through a
+separate writer account (contract in `control.md`).
 
 ## Current mode — organiser guide update, 20 Oct ~13:30 (overrides the measurements below where they differ)
 
@@ -16,11 +17,16 @@ second, plus camera previews (JPEG inside JSON). We can read, not write.
   `sources.process.payload.measurement.substrate.temperature_c`; cooling output
   `sources.process.payload.pid_state.cooling.current_output`; gateway `sources.gateway.payload.state` (was SAFE all
   morning, **RUN** at 13:30).
-- **Writer account** (not issued to us yet): publish `demex/hackathon/mini/extrusion/request` (absolute `flow_percent`
-  0–200 or `pressure_advance_seconds` 0–1, ≤ 1 accepted correction/s); subscribe `.../extrusion/result` (per-request
-  accept/reject/dispatch; `state="setting_confirmed"` + `observation.observed_value` is readback for that request) and
-  `.../extrusion/status` (session, command gate, limits). Needs native DEMEX in RUN. No auto-retry of uncertain results.
-  A reader connection is still needed for monitoring.
+- **Writer account** (issued, works; updated from LEAM's command guide, 20 Oct): publish
+  `demex/hackathon/mini/extrusion/request`, schema `0.2.0`, five absolute-value operations (`flow_percent`,
+  `pressure_advance_seconds`, `nozzle_temperature_c`, `speed_override_percent`, `fan_speed_percent`; ranges in
+  `control.md`), ≤ 1 accepted request/s shared by all operations and senders. Subscribe `.../extrusion/result`
+  (per-request outcome: `accepted`, `setting_confirmed`, `queued_unconfirmed`, `dispatch_unknown`, `rejected`;
+  `setting_confirmed` + `observation.observed_value` is the readback for that request) and `.../extrusion/status`
+  (gateway session, command gate, `highest_admitted_sequence`), both still schema `0.1.0`. Other senders share the
+  controller's sequence and rate limit, so the result topic is not ours alone: match results by `request_id`. Needs
+  native DEMEX in RUN, which only LEAM's operator can set. No auto-retry of uncertain results. A reader connection is
+  still needed for monitoring. Envelope, sequence/expiry and result handling: `control.md` (Request contract).
 - Frame lease ≤ 400 ms: a held frame may be shown (labelled) for ≤ 2 s but never measured as fresh.
 - Passwords are operator-supplied and **must not be embedded in shared code**.
 
@@ -34,8 +40,9 @@ Earlier measurements (before the mode change): a 20 s probe at 12:12 CEST and a 
 - Host, port, user and password: **`.env`** (template `.env.example`; values from the team). Never commit them.
 - You must be on the printer's network segment. The general venue Wi-Fi cannot reach the broker. Test the TCP port, not
   ping.
-- Our reader account is **read-only**. Corrections need a separate writer account that the organisers have not issued
-  yet.
+- Our reader account is **read-only** (monitoring topics only). Corrections use a separate writer account, which has
+  only the request, result and status permissions (so keep a reader connection for telemetry). Its password is
+  operator-supplied: `.env` only.
 - `demex/#` is refused (SUBACK error); `demex/demo/mini/#` or the exact names in `tools/mqtt/common.py` work.
 - An app **on the edge device** reaches the broker directly (verified 20 Oct with `tools/edge/mqtt-probe`).
 
@@ -53,8 +60,10 @@ Earlier measurements (before the mode change): a 20 s probe at 12:12 CEST and a 
 - RGB previews only flow while the organisers keep their RGB viewer open with cameras selected. If RGB stops, ask them.
 - **The app subscribes to telemetry + the two RGB topics only.** IR images must never be persisted (organiser rule), and
   we do not need them for width.
-- Command topic (writer account, not live yet): `demex/hackathon/mini/extrusion/request`, per the organisers' slides.
-  Note the `hackathon` vs `demo` namespace; payload schema and readback topic are unknown. See `control.md`.
+- Command topics (writer account): we publish `demex/hackathon/mini/extrusion/request` and subscribe
+  `demex/hackathon/mini/extrusion/result` and `.../status` by exact name. Note the `hackathon` vs `demo` namespace: they
+  are outside the `demex/demo/mini/#` wildcard. Request schema `0.2.0`, results and status `0.1.0`; the guide asks for
+  the status and result subscriptions to be in place before the first publish. See `control.md`.
 
 ## Preview message
 
@@ -105,15 +114,21 @@ source has its own timestamp.
 | Camera pair | `cameras.ahead`, `cameras.trailing`, `selection_revision` | `process.payload.active_camera_index` always equals `cameras.ahead` |
 | Melt temperature | `melt.payload.temperature_c` | °C, IR-derived; use only if `melt.payload.valid` (true 35 %) |
 | Previous-layer temperature | `process.payload.measurement.substrate.temperature_c` | °C, IR-derived; use only if `...substrate.valid` (65 %) |
-| Output gate | `gateway.payload.state`, `permits_outputs`, `command_gate_closed` | `SAFE` / false / true all day. Never write unless RUN / true / false |
+| Output gate | `gateway.payload.state`, `permits_outputs`, `command_gate_closed` | `SAFE` / false / true all morning, `RUN` seen at ~13:30. Never write unless RUN / true / false (and writer status `normal_authorized` true) |
 
 **Do not use:** `motion.payload.extrusion_speed` (no unit, noisy), `process.payload.pid_state.*` (controllers off),
 `filter_status.*` booleans (constant), `controls.payload.healthy` (false 100 % while status is "OK"), fan values
 (constant), the **outer** `valid` flags (true even when the inner measurement is invalid), `velocity_mm_s.z` (noise).
 Invalid `melt` payloads are short (no temperature): read every field with `.get()`.
 
-**Not in telemetry at all:** nozzle temperature, extruder RPM or pressure, layer number, room temperature, flow or
-pressure-advance readback, any bead width. For layers, bucket Z with ≥ 0.05 mm hysteresis (Z noise is ±0.01 mm).
+**Heater temperatures (added 20 Oct afternoon):** `sources.duet_readback.payload.temperatures.{nozzle,bed}` with
+`current_c`, `active_target_c`, `state` ("active"), `valid`, `heater_index` (nozzle 1, bed 0) and `source_utc_ns`. The
+whole `duet_readback` block refreshes only every ~1.4 s, so values repeat across ~20 messages, and `valid` stays true
+while the reading ages (up to ~1.5 s seen) — check `source_utc_ns`. Flow multiplier readback is the same block
+(`extrusion_percent`, gated on `extrusion_valid`). Not seen yet: a non-"active" state, a fault, or a setpoint change.
+
+**Not in telemetry at all:** extruder RPM or pressure, layer number, room temperature, pressure-advance readback (only
+in the writer's per-request result), any bead width. For layers, bucket Z with ≥ 0.05 mm hysteresis (Z noise is ±0.01 mm).
 
 ## Cameras: index, azimuth, role
 
