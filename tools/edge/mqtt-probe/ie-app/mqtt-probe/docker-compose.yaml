@@ -1,0 +1,15 @@
+version: '2.4'
+services:
+  mqtt-probe:
+    image: mqtt-probe:${APP_VERSION}
+    mem_limit: 128m
+    restart: unless-stopped
+    # Status page on the device's own address, reachable without the device UI login.
+    ports:
+      - "18080:8000"
+    environment:
+      MQTT_HOST: ${MQTT_HOST}
+      MQTT_PORT: ${MQTT_PORT}
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

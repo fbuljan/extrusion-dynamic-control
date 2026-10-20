@@ -8,7 +8,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 TELEMETRY = "demex/demo/mini/telemetry"
 PREVIEWS = [f"demex/demo/mini/preview/{kind}/{side}" for kind in ("rgb", "ir") for side in ("ahead", "trailing")]
-# The broker refuses wildcard subscriptions; topics must be named exactly.
+# demex/# is refused; demex/demo/mini/# works, but exact names keep us honest about what we consume.
+# Since 20 Oct only the trailing previews publish; the ahead topics stay subscribed in case the mode changes back.
 ALL_TOPICS = [TELEMETRY] + PREVIEWS
 
 

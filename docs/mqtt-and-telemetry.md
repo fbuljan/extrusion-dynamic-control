@@ -1,12 +1,31 @@
 # MQTT and telemetry
 
 Everything the app needs arrives on one MQTT broker on the printer's network: a telemetry snapshot about 14 times a
-second, plus camera previews (JPEG inside JSON). We can read, not write. Two things trip people up: the broker refuses
-wildcard subscriptions, and for camera 3 the `ahead`/`trailing` topic name does not tell you which side of the nozzle
-the image shows (see "Cameras").
+second, plus camera previews (JPEG inside JSON). We can read, not write.
 
-Measured on live data on 2026-10-20: a 20 s probe at 12:12 CEST and a 5 min recording (`rec1`, 12:14:40–12:19:40
-CEST, Benchy mid-print). Rates changed between the two; re-measure with `tools/mqtt/probe.py` before relying on one.
+## Current mode — organiser guide update, 20 Oct ~13:30 (overrides the measurements below where they differ)
+
+- **Trailing-only mode.** Only `preview/rgb/trailing` and `preview/ir/trailing` publish, **at most 1 frame/s each**
+  (newest eligible frame only, no backlog). The `ahead` topics are inactive. The physical camera behind the trailing
+  topic changes with travel direction — never assume a fixed camera; read `camera_index` (physical number = index + 1).
+- **Wildcard:** `demex/demo/mini/#` is allowed (verified); only the broader `demex/#` is refused.
+- **Flow readback (new):** `sources.duet_readback.payload.extrusion_multiplier` (1.0 = 100 %), `.extrusion_percent`,
+  `.extrusion_valid`, `.extrusion_source_utc_ns`, ~1/s. Use only when `duet_readback.valid` and `extrusion_valid` are
+  true; null/false means Unknown, never 0 or 100. Verified live: 100 %, valid.
+- **Other paths from the guide:** melt temperature `sources.melt.payload.temperature_c`; previous-layer temperature
+  `sources.process.payload.measurement.substrate.temperature_c`; cooling output
+  `sources.process.payload.pid_state.cooling.current_output`; gateway `sources.gateway.payload.state` (was SAFE all
+  morning, **RUN** at 13:30).
+- **Writer account** (not issued to us yet): publish `demex/hackathon/mini/extrusion/request` (absolute `flow_percent`
+  0–200 or `pressure_advance_seconds` 0–1, ≤ 1 accepted correction/s); subscribe `.../extrusion/result` (per-request
+  accept/reject/dispatch; `state="setting_confirmed"` + `observation.observed_value` is readback for that request) and
+  `.../extrusion/status` (session, command gate, limits). Needs native DEMEX in RUN. No auto-retry of uncertain results.
+  A reader connection is still needed for monitoring.
+- Frame lease ≤ 400 ms: a held frame may be shown (labelled) for ≤ 2 s but never measured as fresh.
+- Passwords are operator-supplied and **must not be embedded in shared code**.
+
+Earlier measurements (before the mode change): a 20 s probe at 12:12 CEST and a 5 min recording (`rec1`,
+12:14:40–12:19:40 CEST, Benchy mid-print). Rates changed between the two; re-measure with `tools/mqtt/probe.py`.
 
 ## Connecting
 
@@ -17,7 +36,8 @@ CEST, Benchy mid-print). Rates changed between the two; re-measure with `tools/m
   ping.
 - Our reader account is **read-only**. Corrections need a separate writer account that the organisers have not issued
   yet.
-- **Wildcards are refused** (SUBACK error). Subscribe to the exact topic names in `tools/mqtt/common.py`.
+- `demex/#` is refused (SUBACK error); `demex/demo/mini/#` or the exact names in `tools/mqtt/common.py` work.
+- An app **on the edge device** reaches the broker directly (verified 20 Oct with `tools/edge/mqtt-probe`).
 
 ## Topics
 

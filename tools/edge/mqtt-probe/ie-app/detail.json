@@ -1,0 +1,4 @@
+{"versionNumber":"","versionId":"","title":"mqtt-probe","appId":"1d8ef568cd5c40ccac73d2b6ff2b3bba","restRedirectUrl":"",
+ "redirectSection":"mqtt-probe","redirectUrl":"mqtt-probe/","redirectType":"FromBoxReverseProxy",
+ "description":"read-only MQTT connectivity probe","swarmModeEnable":false,"required":[],"releaseNotes":"","signUpType":"None",
+ "externalConfigurator":false,"externalUrl":"","webAddress":"","isAppSecure":false}

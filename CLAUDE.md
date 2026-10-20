@@ -21,11 +21,15 @@ LEAM's levels — work in this order:
 
 - RGB frames are 640×480 JPEG at **~0.06 mm/px** (varies across the frame — use the per-camera calibration
   homography, not a constant). 0.1 mm ≈ 1.5–2 px, so edges need subpixel accuracy.
-- Telemetry names an `ahead` and a `trailing` camera, but RGB comes almost only from camera index 3, and for it the
-  `ahead` topic shows the fresh bead. Pick frames by travel direction + image evidence, not by topic name.
+- Since 20 Oct ~13:30 the broker runs **trailing-only**: RGB and IR previews only on the `trailing` topics, ≤ 1 frame/s
+  each, and the physical camera behind it follows the travel direction — read `camera_index` every frame. (Before
+  that, camera 3's `ahead`/`trailing` labels looked swapped; recheck against images in the new mode.)
+- Flow readback is live in telemetry (`duet_readback.payload.extrusion_percent`, honour `extrusion_valid`).
 - The only writable levers are **flow % (0–200)** and **pressure advance (0–1 s)**, max one correction per second,
   through a separate writer account. Nozzle temperature and motor speed are **not** controllable.
-- The broker refuses wildcard subscriptions — name the five topics exactly (`tools/mqtt/common.py`).
+- Subscribe to `demex/demo/mini/#` or the exact topics in `tools/mqtt/common.py` (`demex/#` is refused).
+- Apps on the edge device reach the broker directly; a published container port is reachable from the event network
+  without the device login (verified with `tools/edge/mqtt-probe`, port 18080).
 
 ## Hard rules
 

@@ -53,3 +53,14 @@ login, which we don't have yet. The device uses a self-signed certificate. Rung 
 not yet viewed.
 Verdict: adopt — the full path (build → import → install) works. Next: device UI login from Siemens, then confirm the
 page and test that a container on the device can reach the MQTT broker.
+
+## device-broker-reach | 2026-10-20 | timebox 45 min
+Hypothesis: a container on our edge device can reach the organisers' MQTT broker.
+Pass if: the probe app on the device opens TCP to the broker and gets an MQTT answer.
+Where: `tools/edge/mqtt-probe/` (versions 0.0.2–0.0.3), status JSON on device port 18080.
+Result: **works.** On the device: TCP ok, CONNACK "Not authorized" (the probe deliberately carries no credentials, so
+nothing secret goes into the shared portal; a broker answer proves the path). Bonus: a published container port
+(`ports: 18080:8000`) is reachable from the event network without the device UI login. Hurdles on the way: the first
+build baked credentials into the `.app` (rejected — never upload credentials); device log streaming is disabled, so
+logs aren't visible in the portal; the portal's upload dialog froze once although the import had finished.
+Verdict: adopt. Next: give the real app its credentials at install time (IEM app configuration), not in the `.app`.
