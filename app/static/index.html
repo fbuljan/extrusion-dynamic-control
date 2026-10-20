@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Extrusion Monitor</title>
-  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="app.css?v=0.1.2">
 </head>
 <body>
 <header>
   <h1>DEMEX <span>Extrusion Monitor</span></h1>
+  <span id="version" class="muted mono"></span>
   <span id="st-reader" class="pill">reader: …</span>
   <span id="st-writer" class="pill">writer: …</span>
   <span id="st-gateway" class="pill">gateway: …</span>
@@ -34,12 +35,14 @@
     <section class="panel">
       <h2>Process</h2>
       <div class="metrics">
-        <div class="metric"><div class="k">Melt temp</div><div class="v" id="m-melt">—</div></div>
-        <div class="metric"><div class="k">Previous layer</div><div class="v" id="m-substrate">—</div></div>
-        <div class="metric"><div class="k">Flow (readback)</div><div class="v" id="m-flow">—</div></div>
+        <div class="metric"><div class="k">Nozzle (current / target)</div><div class="v" id="m-nozzle">—</div></div>
+        <div class="metric"><div class="k">Bed (current / target)</div><div class="v" id="m-bed">—</div></div>
+        <div class="metric"><div class="k">Melt (IR)</div><div class="v" id="m-melt">—</div></div>
+        <div class="metric"><div class="k">Previous layer (IR)</div><div class="v" id="m-substrate">—</div></div>
+        <div class="metric"><div class="k">Extrusion multiplier</div><div class="v" id="m-flow">—</div></div>
         <div class="metric"><div class="k">Speed override</div><div class="v" id="m-override">—</div></div>
         <div class="metric"><div class="k">Velocity</div><div class="v" id="m-vel">—</div></div>
-        <div class="metric"><div class="k">Extrusion speed</div><div class="v" id="m-espeed">—</div></div>
+        <div class="metric"><div class="k">Extrusion speed (reported, no unit)</div><div class="v" id="m-espeed">—</div></div>
         <div class="metric"><div class="k">Position Z</div><div class="v" id="m-z">—</div></div>
         <div class="metric"><div class="k">Cooling / fan</div><div class="v" id="m-cool">—</div></div>
       </div>
@@ -47,37 +50,15 @@
 
     <section class="panel">
       <h2>Controls</h2>
-      <div class="control">
-        <div class="row"><strong>Flow</strong><span class="muted">extrusion multiplier, 0–200 %</span></div>
-        <div class="row">
-          <input id="flow-range" type="range" min="0" max="200" step="1" value="100">
-          <input id="flow-num" type="number" min="0" max="200" step="1" value="100">
-          <button class="primary" id="flow-send">Set</button>
-        </div>
-        <div class="presets" data-op="flow_percent">
-          <button data-v="60">60 under</button><button data-v="80">80</button><button data-v="100">100 nominal</button>
-          <button data-v="120">120</button><button data-v="140">140 over</button>
-        </div>
-      </div>
-      <div class="control">
-        <div class="row"><strong>Pressure advance</strong><span class="muted">0–1 s</span></div>
-        <div class="row">
-          <input id="pa-range" type="range" min="0" max="1" step="0.005" value="0">
-          <input id="pa-num" type="number" min="0" max="1" step="0.005" value="0">
-          <button class="primary" id="pa-send">Set</button>
-        </div>
-        <div class="presets" data-op="pressure_advance_seconds">
-          <button data-v="0">0</button><button data-v="0.05">0.05</button><button data-v="0.1">0.1</button>
-          <button data-v="0.3">0.3</button><button data-v="0.6">0.6</button>
-        </div>
-      </div>
-      <p class="note">Max one correction per second. Temperature and custom G-code are not offered by LEAM's command
-        interface — asked LEAM.</p>
+      <div id="controls"></div>
+      <p class="note">One accepted request per second, shared by every operation and every sender. Commands work only while
+        the operator has native DEMEX in RUN; speed override needs Motion PI and fans need Cooling PI disabled there first.
+        "accepted" is not confirmation; wait for the result in the command log.</p>
       <details>
-        <summary>Raw request (JSON to <span class="mono" id="req-topic"></span>)</summary>
+        <summary>Raw request (sent as-is, no checks; JSON to <span class="mono" id="req-topic"></span>)</summary>
         <textarea id="raw"></textarea>
-        <div class="row" style="margin-top:6px"><button id="raw-send">Send raw</button>
-          <span class="muted">Request format is our guess until LEAM shares the schema.</span></div>
+        <div class="row" style="margin-top:6px"><button id="raw-template">New template</button><button id="raw-send">Send raw</button>
+          <span class="muted">A template expires ~1.5 s after the status it was built from.</span></div>
       </details>
       <div id="send-msg" class="muted mono" style="margin-top:8px"></div>
     </section>
@@ -99,12 +80,13 @@
     <label>Reader password <input name="reader_password" type="password" autocomplete="off"></label>
     <label>Writer user <input name="writer_user"></label>
     <label>Writer password <input name="writer_password" type="password" autocomplete="off"></label>
+    <label>Controller ID (from LEAM's command guide) <input name="controller_id"></label>
     <div class="actions"><button type="button" id="close-settings">Cancel</button>
       <button class="primary" type="submit">Save &amp; reconnect</button></div>
   </form>
 </dialog>
 
-<script src="common.js"></script>
-<script src="main.js"></script>
+<script src="common.js?v=0.1.2"></script>
+<script src="main.js?v=0.1.2"></script>
 </body>
 </html>

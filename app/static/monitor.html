@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Topics &amp; Graphs</title>
-  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="app.css?v=0.1.2">
 </head>
 <body>
 <header>
   <h1>DEMEX <span>Topics &amp; Graphs</span></h1>
+  <span id="version" class="muted mono"></span>
   <span id="st-reader" class="pill">reader: …</span>
   <span class="spacer"></span>
   <span id="topic-count" class="muted mono"></span>
@@ -24,8 +25,9 @@
 
   <div class="charts">
     <div class="panel"><h2>Temperatures °C</h2><div class="chart"><canvas id="c-temp"></canvas></div></div>
-    <div class="panel"><h2>Flow readback %</h2><div class="chart"><canvas id="c-flow"></canvas></div></div>
-    <div class="panel"><h2>Motion</h2><div class="chart"><canvas id="c-motion"></canvas></div></div>
+    <div class="panel"><h2>Extrusion multiplier %</h2><div class="chart"><canvas id="c-flow"></canvas></div></div>
+    <div class="panel"><h2>Velocity mm/s</h2><div class="chart"><canvas id="c-motion"></canvas></div></div>
+    <div class="panel"><h2>Extrusion speed (reported, unit unspecified)</h2><div class="chart"><canvas id="c-espeed"></canvas></div></div>
     <div class="panel"><h2>Cooling / fan %</h2><div class="chart"><canvas id="c-cool"></canvas></div></div>
     <div class="panel"><h2>Position Z mm</h2><div class="chart"><canvas id="c-z"></canvas></div></div>
     <div class="panel"><h2>Messages / s per topic</h2><div class="chart"><canvas id="c-rate"></canvas></div></div>
@@ -43,7 +45,7 @@
 </div>
 
 <script src="vendor/chart.umd.min.js"></script>
-<script src="common.js"></script>
-<script src="monitor.js"></script>
+<script src="common.js?v=0.1.2"></script>
+<script src="monitor.js?v=0.1.2"></script>
 </body>
 </html>

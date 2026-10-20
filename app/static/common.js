@@ -34,25 +34,32 @@ function renderStatus(s) {
 function cameraView(imgSel, labelSel, emptySel, name) {
   const img = $(imgSel), label = $(labelSel), empty = $(emptySel);
   let last = null;
-  setInterval(() => {
+  function update() {
     if (!last) return;
-    const age = Date.now() - last.seen;
-    if (age > FRAME_HOLD_MS) {
+    const sinceArrival = Date.now() - last.seen;
+    if (sinceArrival > FRAME_HOLD_MS) {
       img.style.visibility = "hidden";
       empty.style.display = "";
       label.textContent = `${name} · no fresh frame`;
       label.classList.add("held");
-    } else {
-      label.textContent = `${name} · cam ${last.camera_index + 1} · ${last.role}` + (age > FRAME_LEASE_MS ? ` · held ${(age / 1000).toFixed(1)}s` : "");
-      label.classList.toggle("held", age > FRAME_LEASE_MS);
+      return;
     }
-  }, 200);
-  // Ages use the browser's clock (arrival time), since the device clock may differ; snapshot frames carry their age.
+    const fresh = sinceArrival <= last.lease;
+    const ageS = ((last.source_age_ms || 0) + sinceArrival) / 1000;
+    label.textContent = `${name} · cam ${last.camera_index + 1} (idx ${last.camera_index}) · ${last.role} · `
+      + `${fresh ? "fresh" : "held"} · ${ageS.toFixed(1)} s old`;
+    label.classList.toggle("held", !fresh);
+  }
+  setInterval(update, 100);
+  // Lease and ages are relative to arrival: the publisher's clock runs ~160 ms behind, so expires_utc_ms can't be
+  // compared with local time. The server stamps age_ms on every frame it sends.
   return frame => {
-    last = { ...frame, seen: Date.now() - (frame.age_ms || 0) };
+    const lease = Math.min(FRAME_LEASE_MS, Math.max(0, (frame.expires_utc_ms - frame.published_utc_ms) || FRAME_LEASE_MS));
+    last = { ...frame, lease, seen: Date.now() - (frame.age_ms || 0) };
     img.src = `data:image/jpeg;base64,${frame.jpeg_base64}`;
     img.style.visibility = "";
     empty.style.display = "none";
+    update();
   };
 }
 
@@ -68,7 +75,7 @@ function setupSettings() {
   if (!dlg) return;
   $("#open-settings").onclick = async () => {
     const s = await api("api/settings");
-    for (const k of ["host", "port", "reader_user", "writer_user"]) dlg.querySelector(`[name=${k}]`).value = s[k] ?? "";
+    for (const k of ["host", "port", "reader_user", "writer_user", "controller_id"]) dlg.querySelector(`[name=${k}]`).value = s[k] ?? "";
     for (const k of ["reader_password", "writer_password"]) {
       const el = dlg.querySelector(`[name=${k}]`);
       el.value = "";
@@ -84,6 +91,7 @@ function setupSettings() {
   $("#close-settings").onclick = () => dlg.close();
 }
 
+api("api/version").then(v => ($("#version").textContent = `v${v.version}`));
 on("snapshot", m => renderStatus(m.status));
 on("status", renderStatus);
 on("socket", m => { if (!m.up && $("#st-reader")) pill($("#st-reader"), "app offline", "bad"); });

@@ -11,7 +11,7 @@ function lineChart(id, series) {
   return new Chart(document.getElementById(id), {
     type: "line",
     data: { datasets: series.map((label, i) => ({ label, data: [], borderColor: COLORS[i], borderWidth: 1.5,
-      pointRadius: 0, spanGaps: false })) },
+      pointRadius: 0, spanGaps: 1.5 })) },  // break the line where samples are >1.5 s apart (outages)
     options: {
       animation: false, maintainAspectRatio: false, parsing: false,
       scales: { x: { type: "linear", title: { display: true, text: "seconds ago" }, reverse: true, min: 0, max: WINDOW_S } },
@@ -21,9 +21,11 @@ function lineChart(id, series) {
 }
 
 const charts = {
-  temp: [lineChart("c-temp", ["melt", "previous layer"]), m => [m.melt, m.substrate]],
-  flow: [lineChart("c-flow", ["flow %"]), m => [m.flow_pct]],
-  motion: [lineChart("c-motion", ["velocity mm/s", "extrusion speed"]), m => [m.vel, m.extrusion_speed]],
+  temp: [lineChart("c-temp", ["nozzle", "melt (IR)", "previous layer (IR)", "bed"]),
+    m => [m.nozzle?.current, m.melt, m.substrate, m.bed?.current]],
+  flow: [lineChart("c-flow", ["extrusion multiplier %"]), m => [m.flow_pct]],
+  motion: [lineChart("c-motion", ["velocity mm/s"]), m => [m.vel]],
+  espeed: [lineChart("c-espeed", ["extrusion speed"]), m => [m.extrusion_speed]],
   cool: [lineChart("c-cool", ["cooling output", "fan 1"]), m => [m.cooling, m.fan0]],
   z: [lineChart("c-z", ["z"]), m => [m.pos ? m.pos.z : null]],
 };

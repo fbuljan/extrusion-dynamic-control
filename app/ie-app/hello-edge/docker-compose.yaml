@@ -15,6 +15,7 @@ services:
       MQTT_PORT: ${MQTT_PORT}
       MQTT_USER: ${MQTT_USER}
       MQTT_WRITER_USER: ${MQTT_WRITER_USER}
+      MQTT_CONTROLLER_ID: ${MQTT_CONTROLLER_ID}
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}

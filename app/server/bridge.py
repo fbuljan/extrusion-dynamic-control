@@ -12,9 +12,18 @@ import paho.mqtt.client as mqtt
 READ_TOPIC = "demex/demo/mini/#"
 REQUEST_TOPIC = "demex/hackathon/mini/extrusion/request"
 WRITER_TOPICS = ["demex/hackathon/mini/extrusion/result", "demex/hackathon/mini/extrusion/status"]
-MIN_REQUEST_INTERVAL_S = 1.0  # organiser limit: one accepted correction per second across flow and PA
+MIN_REQUEST_INTERVAL_S = 1.0  # organiser limit: one accepted request per second, shared by all operations and senders
 HISTORY_POINTS = 600
-SETTING_KEYS = ["host", "port", "reader_user", "reader_password", "writer_user", "writer_password"]
+STALE_SOURCE_MS = 3000
+SETTING_KEYS = ["host", "port", "reader_user", "reader_password", "writer_user", "writer_password", "controller_id"]
+# LEAM command guide (20 Oct, request schema 0.2.0): the five writable operations and their approved ranges.
+OPERATIONS = {
+    "flow_percent": (0, 200),
+    "pressure_advance_seconds": (0, 1),
+    "nozzle_temperature_c": (190, 250),
+    "speed_override_percent": (10, 200),
+    "fan_speed_percent": (0, 100),
+}
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent.parent / ".data"))
 
 
@@ -43,22 +52,37 @@ def summarize(payload):
     return payload
 
 
+def source(s, name):
+    """A telemetry source's payload, or {} when the source is marked invalid (guide: honour source validity)."""
+    src = s.get(name) or {}
+    return (src.get("payload") or {}) if src.get("valid") is True else {}
+
+
+def heater(duet, name, recv_ms):
+    # Heater readings refresh only every ~1.4 s and stay valid=true while aging, so also drop old ones.
+    h = dig(duet, "temperatures", name) or {}
+    ts = h.get("source_utc_ns")
+    if h.get("valid") is not True or not isinstance(ts, (int, float)) or recv_ms - ts / 1e6 > STALE_SOURCE_MS:
+        return None
+    return {"current": h.get("current_c"), "target": h.get("active_target_c"), "state": h.get("state")}
+
+
 def telemetry_metrics(msg, recv_ms):
     s = msg.get("sources", {})
-    motion = dig(s, "motion", "payload") or {}
-    duet = dig(s, "duet_readback", "payload") or {}
+    motion, duet, process, gateway = (source(s, k) for k in ("motion", "duet_readback", "process", "gateway"))
     melt = s.get("melt", {})
-    substrate = dig(s, "process", "payload", "measurement", "substrate") or {}
-    gateway = dig(s, "gateway", "payload") or {}
-    flow_valid = bool(dig(s, "duet_readback", "valid")) and duet.get("extrusion_valid") is True
-    melt_valid = bool(melt.get("valid")) and dig(melt, "payload", "valid") is True
+    substrate = dig(process, "measurement", "substrate") or {}
+    cooling = dig(process, "pid_state", "cooling") or {}
+    melt_valid = melt.get("valid") is True and dig(melt, "payload", "valid") is True
     fan = lambda i: (v * 100 if isinstance(v := dig(duet, "fans", i, "actualValue"), (int, float)) else None)
     return {
         "type": "telemetry", "t": recv_ms,
+        "nozzle": heater(duet, "nozzle", recv_ms),
+        "bed": heater(duet, "bed", recv_ms),
         "melt": dig(melt, "payload", "temperature_c") if melt_valid else None,
         "melt_reason": dig(melt, "payload", "reason"),
         "substrate": substrate.get("temperature_c") if substrate.get("valid") else None,
-        "flow_pct": duet.get("extrusion_percent") if flow_valid else None,
+        "flow_pct": duet.get("extrusion_percent") if duet.get("extrusion_valid") is True else None,
         "speed_override": motion.get("speed_override_percent"),
         "extrusion_speed": motion.get("extrusion_speed"),
         "vel": motion.get("velocity_magnitude"),
@@ -66,7 +90,8 @@ def telemetry_metrics(msg, recv_ms):
         "moving": motion.get("is_moving"),
         "pos": motion.get("position_mm"),
         "program": motion.get("active_program_name"),
-        "cooling": dig(s, "process", "payload", "pid_state", "cooling", "current_output"),
+        "cooling": cooling.get("current_output"),
+        "cooling_enabled": cooling.get("enabled"),
         "fan0": fan(0), "fan1": fan(1),
         "gateway": gateway.get("state"),
         "permits_outputs": gateway.get("permits_outputs"),
@@ -88,7 +113,10 @@ class Bridge:
         self.last_telemetry_emit_ms = 0
         self.writer_log = deque(maxlen=50)
         self.writer_status = None
+        self.status_rx = (None, 0.0)  # (latest writer status, time.monotonic() at receipt)
         self.last_request_s = 0.0
+        self.last_sequence = 0
+        self.sent_ids = deque(maxlen=200)
 
     # settings -------------------------------------------------------------
     def _load_settings(self):
@@ -97,6 +125,7 @@ class Bridge:
             "reader_user": os.environ.get("MQTT_USER", ""), "reader_password": os.environ.get("MQTT_PASSWORD", ""),
             "writer_user": os.environ.get("MQTT_WRITER_USER", ""),
             "writer_password": os.environ.get("MQTT_WRITER_PASSWORD", ""),
+            "controller_id": os.environ.get("MQTT_CONTROLLER_ID", ""),
         }
         path = DATA_DIR / "settings.json"
         if path.exists():
@@ -145,7 +174,9 @@ class Bridge:
                     c.subscribe(t, qos=0)
 
         def on_disconnect(c, userdata, flags, rc, props):
-            self._set_status(role, f"disconnected: {rc}")
+            # A refused login is followed by a generic "Unspecified error" disconnect; keep the refusal visible.
+            if not self.status[role].startswith("refused"):
+                self._set_status(role, f"disconnected: {rc}")
 
         client.on_connect, client.on_disconnect = on_connect, on_disconnect
         client.on_message = self._on_message
@@ -169,7 +200,7 @@ class Bridge:
         except ValueError:
             payload = msg.payload[:200].decode(errors="replace")
         with self.lock:
-            st = self.topics.setdefault(msg.topic, {"count": 0, "recent": deque(maxlen=200), "last_ms": 0, "last": None})
+            st = self.topics.setdefault(msg.topic, {"count": 0, "recent": deque(maxlen=600), "last_ms": 0, "last": None})
             st["count"] += 1
             st["recent"].append(t)
             st["last_ms"] = t
@@ -187,14 +218,17 @@ class Bridge:
         elif "/preview/" in msg.topic and isinstance(payload, dict) and payload.get("jpeg_base64"):
             frame = {"type": "frame", "recv_ms": t, **{k: payload.get(k) for k in (
                 "camera_kind", "camera_index", "role", "jpeg_base64", "published_utc_ms", "expires_utc_ms",
-                "source_age_ms", "sequence")}}
+                "source_age_ms", "sequence", "session_id", "selection_revision")}}
             self.frames[payload.get("camera_kind")] = frame
             self._emit(frame)
         elif msg.topic.endswith("/extrusion/status"):
             self.writer_status = payload
+            self.status_rx = (payload, time.monotonic())
             self._emit({"type": "writer_status", "t": t, "payload": payload})
         elif msg.topic.endswith("/extrusion/result"):
-            entry = {"t": t, "kind": "result", "payload": payload}
+            # Every sender shares this topic; mark which results answer our own requests.
+            ours = isinstance(payload, dict) and payload.get("request_id") in self.sent_ids
+            entry = {"t": t, "kind": "result", "payload": payload, "ours": ours}
             self.writer_log.appendleft(entry)
             self._emit({"type": "writer_log", **entry})
 
@@ -207,14 +241,58 @@ class Bridge:
                     for topic, st in sorted(self.topics.items())}
 
     # outgoing -------------------------------------------------------------
+    def make_request(self, operation, value):
+        """A 0.2.0 request built like the reference helper in LEAM's command guide; raises ValueError if not allowed."""
+        status, received = self.status_rx
+        if not status:
+            raise ValueError("no writer status received yet")
+        if status.get("schema_version") != "0.1.0":
+            raise ValueError(f"unsupported status version {status.get('schema_version')!r}")
+        controller = self.settings["controller_id"]
+        if not controller or status.get("controller_id") != controller:
+            raise ValueError("status does not name our configured controller ID (see Settings)")
+        if status.get("normal_authorized") is not True:
+            raise ValueError("gate closed: the operator must put native DEMEX in RUN")
+        published, deadline = status.get("published_utc_ms"), status.get("expires_utc_ms")
+        age_ms = (time.monotonic() - received) * 1000
+        if not (isinstance(published, (int, float)) and isinstance(deadline, (int, float))
+                and 0 < deadline - published <= 2000 and 0 <= age_ms < min(1500, deadline - published)):
+            raise ValueError("no fresh writer status, try again in a moment")
+        low, high = OPERATIONS[operation]
+        if type(value) not in (int, float) or not low <= value <= high:
+            raise ValueError(f"{operation} must be within {low}–{high}")
+        return {
+            "schema_version": "0.2.0",
+            "gateway_session_id": status["gateway_session_id"],
+            "controller_id": controller,
+            "request_id": str(uuid.uuid4()),
+            "sequence": max(status.get("highest_admitted_sequence") or 0, self.last_sequence) + 1,
+            "issued_utc_ms": published,
+            "expires_utc_ms": min(published + 1500, deadline),
+            "extruder_index": 0,
+            "correction": {"operation": operation, "value": value},
+        }
+
+    def log_refused(self, what, error):
+        """Record a command the app refused to send, so it shows in every open command log."""
+        entry = {"t": now_ms(), "kind": "refused", "payload": {"request": what, "error": error}}
+        self.writer_log.appendleft(entry)
+        self._emit({"type": "writer_log", **entry})
+        return {"ok": False, "error": error}
+
     def send_request(self, request):
+        what = request.get("correction") if isinstance(request, dict) and request.get("correction") else "raw"
         if not self.writer or self.status.get("writer") != "connected":
-            return {"ok": False, "error": f"writer not connected ({self.status.get('writer')})"}
+            return self.log_refused(what, f"writer not connected ({self.status.get('writer')})")
         wait = MIN_REQUEST_INTERVAL_S - (time.time() - self.last_request_s)
         if wait > 0:
-            return {"ok": False, "error": f"rate limit: wait {wait:.1f}s"}
+            return self.log_refused(what, f"rate limit: wait {wait:.1f}s")
         self.last_request_s = time.time()
         info = self.writer.publish(REQUEST_TOPIC, json.dumps(request), qos=0)
+        if isinstance(request, dict):
+            if isinstance(request.get("sequence"), int):
+                self.last_sequence = max(self.last_sequence, request["sequence"])
+            self.sent_ids.append(request.get("request_id"))
         entry = {"t": now_ms(), "kind": "request", "payload": request, "published": info.rc == mqtt.MQTT_ERR_SUCCESS}
         self.writer_log.appendleft(entry)
         self._emit({"type": "writer_log", **entry})
@@ -228,6 +306,6 @@ class Bridge:
     def snapshot(self):
         t = now_ms()
         frames = {kind: {**f, "age_ms": t - f["recv_ms"]} for kind, f in self.frames.items()}
-        return {"type": "snapshot", "status": self.status, "settings": self.public_settings(),
+        return {"type": "snapshot", "server_ms": t, "status": self.status, "settings": self.public_settings(),
                 "history": list(self.history), "frames": frames, "writer_log": list(self.writer_log),
                 "writer_status": self.writer_status, "request_topic": REQUEST_TOPIC}

@@ -14,7 +14,7 @@ tiap=$(command -v tiap || echo "$HOME/go/bin/tiap")
 [ -x "$tiap" ] || { echo "tiap missing: brew install go && go install github.com/thediveo/tiap/cmd/tiap@v0.14.5" >&2; exit 1; }
 if [ -f "$repo_root/.env" ]; then set -a; . "$repo_root/.env"; set +a; fi
 
-docker buildx build --platform linux/amd64 --provenance=false -t "$name:$APP_VERSION" -f "$app_dir/Dockerfile" --load "$repo_root"
+docker buildx build --platform linux/amd64 --provenance=false --build-arg APP_VERSION="$APP_VERSION" -t "$name:$APP_VERSION" -f "$app_dir/Dockerfile" --load "$repo_root"
 mkdir -p "$app_dir/dist"
 "$tiap" -i -o "$app_dir/dist/${name}_${APP_VERSION}.app" --platform linux/amd64 --app-version "$APP_VERSION" "$app_dir/ie-app"
 echo "built $app_dir/dist/${name}_${APP_VERSION}.app"
