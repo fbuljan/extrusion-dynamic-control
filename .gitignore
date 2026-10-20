@@ -20,8 +20,10 @@ venv/
 
 # Edge packaging artefacts
 *.app
+dist/
 
 # OS / editors
 .DS_Store
 .idea/
 .vscode/
+.playwright-mcp/

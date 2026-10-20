@@ -1,0 +1,1 @@
+{"hello-edge":[{"name":"hello-edge","protocol":"HTTP","port":"8000","headers":"","rewritetarget":"/"}]}
