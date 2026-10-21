@@ -779,6 +779,15 @@ def sparse(label, n, seconds):
                 f"the decision log is incomplete")
 
 
+WALLS_ALARM = re.compile(r"alarm: below [\d.]+ mm \(walls may not touch\); ")
+
+
+def own(reason):
+    """The reason without the app's walls alarm in front (D45): checks of the controller's verdict read what follows."""
+    m = WALLS_ALARM.match(reason)
+    return reason[m.end():] if m else reason
+
+
 def check_advice(run, mode, dry):
     """Right sign wherever the controller acted, nothing advised in baseline 0, and a log dense enough to say so.
 
@@ -793,7 +802,7 @@ def check_advice(run, mode, dry):
     auto_on = next((p[0] for p in run.posts if p[1] == "auto on" and p[2] == 200), None)
     if auto_on is not None:  # decisions before the switch are advice by definition
         every = [m for m in every if m["wall_ms"] > auto_on + 1500]
-    refused = [m for m in every if m["reason"].startswith("alarm: target")]
+    refused = [m for m in every if own(m["reason"]).startswith("alarm: target")]
     if refused:
         problems.append(f"{len(refused)} decisions refuse the target as above the camera's ceiling "
                         f"({refused[0]['reason']!r}): the scenario did not exercise the controller")
@@ -809,7 +818,7 @@ def check_advice(run, mode, dry):
         problems += [p for p in [sparse(label, len(window), (hi - lo) / 1000)] if p]
         acted = [m for m in window if m["action"] and not m["hold"]]
         wrong = [m for m in acted if m["error_mm"] is None or m["error_mm"] * sign <= 0 or not lever_direction_ok(m, sign, plan)]
-        holds = Counter(m["reason"].split(" (")[0].split(";")[0][:48] for m in window if m not in acted)
+        holds = Counter(own(m["reason"]).split(" (")[0].split(";")[0][:48] for m in window if m not in acted)
         report[label] = {"seconds": round((hi - lo) / 1000), "decisions": len(window), "actionable": len(acted),
                          "right_sign": len(acted) - len(wrong), "wrong_sign": len(wrong),
                          "holds": dict(holds.most_common(6))}
@@ -818,7 +827,7 @@ def check_advice(run, mode, dry):
             problems.append(f"{label}: {len(wrong)} of {len(acted)} advised actions point the wrong way, "
                             f"e.g. {wrong[0]['action']} (error {wrong[0]['error_mm']})")
         if must_advise:
-            on_target = sum(m["reason"].startswith("on target") for m in window)
+            on_target = sum(own(m["reason"]).startswith("on target") for m in window)
             if on_target:
                 problems.append(f"{label}: {on_target} of {len(window)} decisions call the bead on target")
             if not acted:
@@ -829,8 +838,8 @@ def check_advice(run, mode, dry):
     for i, (lo, hi) in enumerate(w.baselines):
         window = decisions_in(run, lo, hi, only_active=False)
         acted = [m for m in window if m["action"] and not m["hold"]]
-        on_target = sum(m["reason"].startswith("on target") for m in window)
-        holds = Counter(m["reason"].split(" (")[0].split(";")[0][:48] for m in window if m not in acted)
+        on_target = sum(own(m["reason"]).startswith("on target") for m in window)
+        holds = Counter(own(m["reason"]).split(" (")[0].split(";")[0][:48] for m in window if m not in acted)
         report.setdefault("baseline", []).append({
             "seconds": round((hi - lo) / 1000), "decisions": len(window), "actionable": len(acted),
             "on_target": on_target, "holds": dict(holds.most_common(4)),
@@ -870,21 +879,21 @@ def check_auto(run):
     problems, reqs = check_gateway(run), requests_seen(run)
     every = [m for m in read_jsonl(run.ws_path) if m["type"] == "decision"]
     if len(reqs) != 1:
-        would = [m for m in every if m["reason"].startswith("gate closed (would set")]
+        would = [m for m in every if own(m["reason"]).startswith("gate closed (would set")]
         why = f"; Auto wanted to act ({len(would)} decisions, e.g. {would[0]['reason']!r}) but the gate stayed closed" if would else ""
         problems.append(f"{len(reqs)} requests, expected exactly one (open loop: one unconfirmed command, then an alarm){why}")
     if not reqs:
         return problems
     first = reqs[0]["wall_ms"]
     after = [m for m in every if m["wall_ms"] > first]
-    alarms = [m for m in after if m["reason"].startswith("alarm:")]
+    alarms = [m for m in after if own(m["reason"]).startswith("alarm:")]
     if not alarms:
         problems.append("no 'alarm:' decision after the first (unconfirmed) command")
     else:
         if alarms[0]["wall_ms"] - first > 30_000:
             problems.append(f"the alarm came {(alarms[0]['wall_ms'] - first) / 1000:.0f} s after the first command")
         later = [m for m in after if m["wall_ms"] >= alarms[0]["wall_ms"]]
-        released = [m for m in later if not (m["hold"] and m["reason"].startswith("alarm:"))]
+        released = [m for m in later if not (m["hold"] and own(m["reason"]).startswith("alarm:"))]
         if released:
             problems.append(f"{len(released)} of {len(later)} decisions after the first alarm are not held alarms, "
                             f"e.g. {released[0]['reason']!r}")

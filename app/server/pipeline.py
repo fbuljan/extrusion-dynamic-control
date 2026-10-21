@@ -26,7 +26,7 @@ from pathlib import Path
 from . import control_config, model_files
 from .bridge import STALE_SOURCE_MS, dig, now_ms, telemetry_metrics
 from .control_state import send_enabled
-from .controller import Controller, Decision
+from .controller import Controller, Decision, lead_with
 from .estimator import WidthEstimator
 from .geometry import Geometry
 from .width import MotionBuffer, WidthExtractor, frame_time_ms, motion_from_telemetry
@@ -513,6 +513,7 @@ class Pipeline:
     def _step(self, now, target, auto, stamp=None):
         mode = "auto" if auto else "advise"
         problem = self.target_problem(target, stamp)
+        walls = None  # the overrides below keep the bead's own alarm in front
         if self.missing:
             d = Decision(now, mode, None, f"no model: {', '.join(self.missing)}", None, None, [], True)
         elif self.mismatch:
@@ -524,11 +525,12 @@ class Pipeline:
             setpoints, measured, context = self._inputs(now)
             d = self.controller.step(now, est, None if problem else target, setpoints, measured, context,
                                      self.gate_open(now), auto)
+            walls = self.controller.walls_alarm(est)
             if problem:
-                d = Decision(now, mode, None, problem, None, None, [], True)
+                d = Decision(now, mode, None, lead_with(walls, problem), None, None, [], True)
         alarm = self._clock_alarm(self.clock_offset_ms())
         if alarm:
-            d = Decision(now, mode, None, alarm, d.error_mm, d.predicted_mm, d.candidates, True)
+            d = Decision(now, mode, None, lead_with(walls, alarm), d.error_mm, d.predicted_mm, d.candidates, True)
         # dry: what Auto would do, nothing published; sent: whether this decision's action went out (None: not tried)
         out = {**d.to_dict(), "dry": auto and not send_enabled(), "sent": None}
         if auto and d.action is not None and not d.hold:
@@ -538,7 +540,7 @@ class Pipeline:
                 why = self._send(d, now)
                 out["sent"] = why is None
                 if why:  # the planned action stays in `action`; the dashboard must not show it as taken
-                    out.update(hold=True, reason=f"not sent: {why}")
+                    out.update(hold=True, reason=lead_with(walls, f"not sent: {why}"))
                     self._note_unsent(d.action, now)
         return out
 

@@ -8,7 +8,8 @@ learned slowly (zero mean, so the absolute level stays the camera model's) and r
 Per view: a median-guarded trimmed mean whose sigma is the single-sample noise scale learned over the last
 `noise_samples` samples (a MAD of the handful in one window is too noisy to gate on) over sqrt(n); then inverse-variance
 across views. The camera is blind above its knee: at_ceiling says the estimate is within knee_margin_mm of the
-camera model's ceiling, where a wider bead would read the same. sigma_mm is the random part only: the camera model's sigma is a calibration error shared by all samples of
+camera model's ceiling, where a wider bead would read the same. sigma_mm is the random part (plus the views'
+disagreement while their offsets are still being learned): the camera model's sigma is a calibration error shared by all samples of
 a view, which doesn't shrink with n or make the trend noisy, so it is reported apart as model_sigma_mm. Readings beyond
 the model's valid range lower the confidence instead. add() and estimate() may run on different threads.
 """
@@ -19,7 +20,7 @@ from collections import deque
 
 DEFAULTS = {"window_s": 25.0, "min_samples": 5, "max_age_ms": 5000, "full_n": 10, "min_spread_mm": 0.02,
             "noise_samples": 120, "group_memory_s": 60.0, "harmonize_s": 60.0, "trim_sigmas": 2.5,
-            "knee_margin_mm": 0.05}
+            "knee_margin_mm": 0.05, "view_spread_cap": 1.0, "sigma_bucket_s": 1.0}
 MAD_TO_SIGMA = 1.4826
 MEDIAN_SE = 1.2533  # a median's standard error relative to the mean's, for normal noise
 HISTORY_MS = 60_000  # samples kept for comparing views
@@ -42,6 +43,7 @@ class WidthEstimator:
         self._residuals = deque(maxlen=self.cfg["noise_samples"])  # |sample - median of its view's window|
         self._seen = {}  # group -> last recv_ms
         self._offsets, self._offsets_ms = {}, None  # group -> mm above the views' mean
+        self._learning = {}  # group -> when its offset started being learned
         self.skipped = {}
         self.reason = "no samples"  # why the last estimate() returned None
 
@@ -80,6 +82,11 @@ class WidthEstimator:
         self._seen[group] = max(recv, self._seen.get(group, recv))
         return None
 
+    def _independent(self, members):
+        """How many samples count towards a view's sigma: one per sigma_bucket_s at most (closer frames correlate)."""
+        bucket = self.cfg["sigma_bucket_s"] * 1000
+        return len({s[0] // bucket for s in members}) if bucket > 0 else sum(1 for _ in members)
+
     def noise_mm(self):
         """Single-sample noise scale (robust sigma), or None until enough samples."""
         with self._lock:
@@ -103,6 +110,7 @@ class WidthEstimator:
             a = 1 - math.exp(-max(dt, 0.0) / self.cfg["harmonize_s"])
             for g, m in medians.items():
                 self._offsets[g] = self._offsets.get(g, 0.0) + (m - center - self._offsets.get(g, 0.0)) * a
+                self._learning.setdefault(g, now_ms)
             mean = statistics.fmean(self._offsets.values())
             self._offsets = {g: o - mean for g, o in self._offsets.items()}
         self._offsets_ms = now_ms
@@ -140,19 +148,24 @@ class WidthEstimator:
             med = statistics.median(values)
             model = statistics.median(s[4] for s in members)
             if noise:
-                kept = [v for v in values if abs(v - med) <= cfg["trim_sigmas"] * noise] or [med]
-                loc, se = statistics.fmean(kept), noise / math.sqrt(len(kept))
+                kept = [(v, s) for v, s in zip(values, members) if abs(v - med) <= cfg["trim_sigmas"] * noise]
+                loc = statistics.fmean(v for v, _ in kept) if kept else med
+                se = noise / math.sqrt(self._independent(s for _, s in kept) if kept else 1)
             else:
                 spread = max(MAD_TO_SIGMA * statistics.median(abs(v - med) for v in values), cfg["min_spread_mm"])
-                loc, se = med, MEDIAN_SE * spread / math.sqrt(len(values))
+                loc, se = med, MEDIAN_SE * spread / math.sqrt(self._independent(members))
             per[str(group)] = {"mm": loc, "n": len(values), "sigma_mm": se, "model_sigma_mm": model}
         weights = {g: 1 / p["sigma_mm"] ** 2 for g, p in per.items()}
         total = sum(weights.values())
         mm = sum(w * per[g]["mm"] for g, w in weights.items()) / total
         sigma = 1 / math.sqrt(total)
-        if len(per) > 1 and not harmonize:  # unharmonized views disagreeing beyond their noise widen the uncertainty
+        if len(per) > 1:
+            # Views disagreeing beyond their noise widen sigma in full until their offsets are learned (at 2 frames/s
+            # the random part alone no longer covers them), and by at most view_spread_cap after.
+            learned = harmonize and all(now_ms - self._learning.get(g, now_ms) >= cfg["harmonize_s"] * 1000
+                                        for g in groups)
             chi2 = sum(w * (per[g]["mm"] - mm) ** 2 for g, w in weights.items())
-            sigma *= max(1.0, math.sqrt(chi2 / (len(per) - 1)))
+            sigma *= min(cfg["view_spread_cap"] if learned else math.inf, max(1.0, math.sqrt(chi2 / (len(per) - 1))))
         # A median-like estimate is in the camera's valid range when at least half its samples are.
         in_range = sum(s[5] for s in rows) / len(rows)
         confidence = statistics.fmean(s[6] for s in rows) * min(1.0, len(rows) / cfg["full_n"]) * min(1.0, 2 * in_range)
@@ -167,4 +180,5 @@ class WidthEstimator:
                 "per_group": per, "groups_active": active, "since_ms": since_ms, "in_range": in_range,
                 "model_sigma_mm": max(p["model_sigma_mm"] for p in per.values()),
                 "view_offsets_mm": {str(g): o for g, o in self._offsets.items()},
-                "ceiling_mm": ceiling, "at_ceiling": ceiling is not None and mm >= ceiling - cfg["knee_margin_mm"]}
+                "ceiling_mm": ceiling, "at_ceiling": ceiling is not None and mm >= ceiling - cfg["knee_margin_mm"],
+                "relative": bool(getattr(self.camera_model, "relative", False))}

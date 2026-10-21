@@ -22,7 +22,13 @@ DEFAULTS = {
     "kappa": 0.5,                # ask the model for this fraction of the gap per command
     "deadband_mm": 0.05,
     "sigma_factor": 2.0,         # also hold while |error| <= sigma_factor * estimate sigma
-    "persist_ticks": 10,         # ticks in a row the error must stay outside the band (a rolling estimate wanders)
+    # A rolling estimate wanders: the error must stay outside the band on one side this long, over this many
+    # estimates. Ticks without a usable estimate count as time but not as estimates, until the last estimate off
+    # target is persist_gap_s old (longer than a layer change or a blind side): then the run starts over.
+    "persist_s": 10.0,
+    "persist_estimates": 5,
+    "persist_gap_s": 30.0,
+    "min_width_mm": 1.30,        # below this the walls of a part may not touch: an alarm, not a hold
     "group_rule": "two_groups",
     "residual_weight": 20.0,
     "step_penalty": 0.5,
@@ -53,7 +59,9 @@ DEFAULTS = {
 }
 FLOORS = {"min_spacing_ms": (2000, None), "max_failures": (1, 3), "foreign_hold_s": (10, None), "pin_s": (60, None),
           "min_confidence": (0.3, None), "settle_samples": (3, None),
-          "widen_response_ratio": (0.3, 1.0)}
+          "widen_response_ratio": (0.3, 1.0), "persist_s": (0, None), "persist_estimates": (1, None),
+          "persist_gap_s": (1, None),
+          "min_width_mm": (0.8, 2.0)}
 
 
 def load(overrides=None):

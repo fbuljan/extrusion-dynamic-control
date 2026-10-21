@@ -7,6 +7,7 @@ to the bench's gateway. The stub models are legitimate here because the sim is t
 """
 import json
 import math
+import re
 from collections import Counter
 from types import SimpleNamespace
 
@@ -252,11 +253,24 @@ def melt_limit(factor):
 
 
 def operator(op, value):
-    """Another sender changes a lever through the gateway: the app sees a foreign result, then the readback."""
-    return lambda plant, gateway: gateway.submit(plant.t, op, value, sender="operator")
+    """Another sender changes a lever through the gateway: the app sees a foreign result, then the readback. When our
+    request took the gateway's one-per-second slot, the operator sends again a second later."""
+    def submit(plant, gateway):
+        if gateway.submit(plant.t, op, value, sender="operator").get("reason") == "rate_limited":
+            gateway.submit(plant.t + gateway.p.min_interval_s, op, value, sender="operator")
+    return submit
 
 
 # measures -----------------------------------------------------------------------------------------------------------------
+WALLS_ALARM = re.compile(r"alarm: below [\d.]+ mm \(walls may not touch\); ")
+
+
+def own(reason):
+    """The reason without the walls alarm in front: a check of the controller's own verdict reads what is behind it."""
+    m = WALLS_ALARM.match(reason)
+    return reason[m.end():] if m else reason
+
+
 def error(out):
     return out["true_mm"] - out["target"]
 
@@ -365,9 +379,10 @@ def recovers(t_back, extra_s=0):
 
 
 # scenarios --------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("rate_hz", [1.0, 2.0])  # LEAM's IR rate before and after 21 Oct ~13:22
 @pytest.mark.parametrize("seed", SEEDS)
-def test_flow_efficiency_drop_is_recovered_without_oscillation(run, tmp_path, seed):
-    out, rig = run(seed=seed, events=[(DISTURBED_AT_S, flow_efficiency(0.8))])
+def test_flow_efficiency_drop_is_recovered_without_oscillation(run, tmp_path, seed, rate_hz):
+    out, rig = run(seed=seed, events=[(DISTURBED_AT_S, flow_efficiency(0.8))], rate_hz=rate_hz)
     line, t_back = summary("flow efficiency -20 %", seed, out, rig, DISTURBED_AT_S)
     assert abs(error(out)[out["t_s"] < DISTURBED_AT_S]).max() < 0.02
     assert len(sent_between(rig, 0, DISTURBED_AT_S)) <= 1, "at most one premature move (the views' offsets are unlearned)"
@@ -401,7 +416,7 @@ def test_melt_limit_drop_with_an_unaware_model_stays_safe_and_alarms(run, seed):
     summary("melt limit -40 %, unaware model", seed, out, rig, DISTURBED_AT_S)
     assert out["flow_percent"].max() <= 130 and out["speed_override_percent"].min() >= 60
     assert len(rig.requests) <= 8, "it does not keep pushing a lever that cannot help"
-    assert rig.ticks[-1][1]["hold"] and rig.ticks[-1][1]["reason"].startswith("alarm:")
+    assert rig.ticks[-1][1]["hold"] and own(rig.ticks[-1][1]["reason"]).startswith("alarm:")
     assert reversals(out, DISTURBED_AT_S) == 0
     assert safety_problems(out, rig) == []
 
@@ -462,7 +477,7 @@ def test_two_failed_requests_in_a_row_latch_an_alarm_and_nothing_more_is_sent(ru
     summary("two failures", seed, out, rig, DISTURBED_AT_S)
     assert len(rig.requests) == 2
     last = rig.ticks[-1][1]
-    assert last["hold"] and last["reason"].startswith("alarm:")
+    assert last["hold"] and own(last["reason"]).startswith("alarm:")
     assert sent_between(rig, (rig.requests[1]["t_ms"] - T0_MS) / 1000 + 1, 1e9) == []
     assert safety_problems(out, rig) == []
 
@@ -490,9 +505,9 @@ def test_open_loop_one_unconfirmed_command_then_a_latched_alarm(run, seed):
     assert len(rig.requests) == 1, "exactly one command, never a second"
     sent_s = (rig.requests[0]["t_ms"] - T0_MS) / 1000
     after = decisions_between(rig, sent_s + 1, 1e9)
-    alarms = [d for d in after if d["reason"].startswith("alarm:")]
+    alarms = [d for d in after if own(d["reason"]).startswith("alarm:")]
     assert alarms and alarms[0]["hold"] and (alarms[0]["t_ms"] - T0_MS) / 1000 - sent_s <= 30
-    assert all(d["hold"] for d in after) and after[-1]["reason"].startswith("alarm:")
+    assert all(d["hold"] for d in after) and own(after[-1]["reason"]).startswith("alarm:")
     assert safety_problems(out, rig) == []
 
 
@@ -501,7 +516,7 @@ def test_a_target_without_the_apps_stamp_is_never_acted_on(run):
     out, rig = run(seed=0, stamped=False, events=[(DISTURBED_AT_S, flow_efficiency(0.8))])
     assert rig.requests == []
     held = [d for _, d, *_ in rig.ticks if d["error_mm"] is None or d["hold"]]
-    assert len(held) == len(rig.ticks) and rig.ticks[-1][1]["reason"].startswith("alarm:")
+    assert len(held) == len(rig.ticks) and own(rig.ticks[-1][1]["reason"]).startswith("alarm:")
 
 
 def test_the_safety_check_holds_the_written_down_limits_even_against_a_loosened_config():

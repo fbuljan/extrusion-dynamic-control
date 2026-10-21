@@ -578,6 +578,9 @@ class RogueController:
     def step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto):
         return Decision(now_ms, "auto" if auto else "advise", self.action, "rogue", None, None, [], self.hold)
 
+    def walls_alarm(self, estimate):
+        return self.real.walls_alarm(estimate)
+
     def note_sent(self, *args):
         self.sent.append(args)
 
@@ -627,6 +630,31 @@ def test_the_pipeline_refuses_what_the_controller_must_never_ask(sim, monkeypatc
         assert d["hold"] is True and d["sent"] is False and d["action"] == action, "intended, not taken"
     else:
         assert "not sent" not in d["reason"] and d["sent"] is (True if case == "ok" else None)
+
+
+WALLS = "alarm: below 1.30 mm (walls may not touch); "
+
+
+@pytest.mark.parametrize("override", ["not sent", "clock", "target stamp"])
+def test_the_walls_alarm_leads_the_pipelines_own_overrides(sim, monkeypatch, tmp_path, override):
+    if override == "clock":
+        monkeypatch.setattr(sys.modules[__name__], "OFFSET_MS", 5000)
+    s = sim(auto=True, **({"camera": stub_camera(), "target": None, "control": legacy_file(tmp_path)}
+                          if override == "target stamp" else {}))
+    s.flow, s.flow_history = 80.0, [(-math.inf, 80.0)]  # a 1.20 mm bead
+    s.run(30)
+    if override == "not sent":
+        s.pipeline.controller = RogueController(s.pipeline.controller, {"operation": "flow_percent", "value": 90})
+        s.pipeline._status = (writer_status(s.clock(), authorized=False), s.clock())
+        d = s.pipeline.tick()
+        assert d["reason"].startswith(WALLS + "not sent: gate closed") and d["sent"] is False and d["hold"]
+    else:
+        d = s.decisions[-1]
+        rest = "alarm: device clock differs from LEAM's" if override == "clock" else TARGET_ALARM
+        assert d["reason"].startswith(WALLS + rest) and d["action"] is None and d["hold"]
+    s.flow, s.flow_history = 100.0, [(-math.inf, 100.0)]  # 1.50 mm: no walls alarm, the overrides as before
+    s.run(30)
+    assert not s.decisions[-1]["reason"].startswith(WALLS)
 
 
 def test_the_pipeline_keeps_its_own_spacing(sim):

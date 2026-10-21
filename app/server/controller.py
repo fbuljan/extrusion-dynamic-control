@@ -9,10 +9,12 @@ go to note_external. Readbacks are the truth about what is set, gateway results 
 Works in increments: it asks the printer model which setpoint changes the width by kappa * (target - estimate)
 from the current setpoints, so a constant model bias cancels. At most one command in flight: after a command nothing
 else is sent until beads deposited after its effect delay have been measured (`settle_samples` of them). A rolling
-median wanders, so the error must also stay outside the band for `persist_ticks` ticks before anything is proposed.
-The camera is blind above its knee, and a drifted IR baseline can put that blind plateau anywhere below it: no
-target above the ceiling, no widening at it, and every widening step goes from a settled width and must show its effect
-(each view against itself) before the next one, or widening latches until Auto is re-armed.
+median wanders, so the error must also stay outside the band on one side for `persist_s` (over `persist_estimates`
+estimates) before anything is proposed; ticks without a usable estimate pause that count instead of resetting it.
+A camera with a ceiling is blind above its knee, and a drifted IR baseline can put that blind plateau anywhere below
+it: no target above the ceiling, no widening at it, and every widening step goes from a settled width and must show its
+effect (each view against itself) before the next one, or widening latches until Auto is re-armed. Without a ceiling
+widening steps go like narrowing ones. A confident estimate below `min_width_mm` leads every reason with an alarm.
 """
 import math
 import statistics
@@ -54,6 +56,11 @@ def _fmt(op, value):
 
 def _finite(value):
     return isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def lead_with(alarm, reason):
+    """The reason led by an alarm (None: unchanged); an alarm of the reason's own stays one behind it."""
+    return f"{alarm}; {reason}" if alarm and not reason.startswith(alarm) else reason
 
 
 class ModelFailure(Exception):
@@ -103,7 +110,7 @@ class Controller:
         self._streak = None  # the current run of same-direction steps on one lever, for the ineffective check
         self._last_action_ms = None
         self._unreachable_steps = 0
-        self._outside = 0  # consecutive ticks the error was outside the band
+        self._off = None  # the current run of estimates off target on one side: {"sign", "since_ms", "last_ms", "n"}
         self._feed, self._feed_ms = 1.0, None  # anchor: estimate / model width, smoothed
 
     # caller notes ---------------------------------------------------------------------------------------------------
@@ -124,7 +131,7 @@ class Controller:
         self._uncertain.setdefault(operation, []).append(
             (value, now_ms, now_ms + self.cfg["uncertain_memory_s"] * 1000, p.get("predicted"), p.get("before")))
         self._last_action_ms = now_ms
-        self._outside = 0  # the next command needs its own run of ticks off target
+        self._off = None  # the next command needs its own run off target
         self._widen = None
         if p.get("unreachable"):
             self._unreachable_steps += 1
@@ -166,6 +173,7 @@ class Controller:
         self._since = t_ms if self._since is None else max(self._since, t_ms)
         if change:  # estimates of beads laid before a change say nothing about the width after it
             self._recent.clear()
+            self._off = None
 
     def _forget(self, op, value):
         tol = self.cfg["levers"][op]["tolerance"]
@@ -306,6 +314,7 @@ class Controller:
 
     def _arm(self, now_ms):
         self._alarm, self._failures, self._disabled, self._streak = None, 0, {}, None
+        self._off = None  # switched on: Auto confirms the deviation itself
         self._refused.clear()
         self._saturated = False  # a pending judgement stays: the step it judges was taken all the same
         self._unreachable_steps = 0
@@ -313,15 +322,32 @@ class Controller:
 
     # decision -------------------------------------------------------------------------------------------------------
     def step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto):
+        d = self._step(now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto)
+        d.reason = lead_with(self.walls_alarm(estimate), d.reason)  # an alarm on the bead, not a hold
+        return d
+
+    def walls_alarm(self, estimate):
+        """The alarm for a usable estimate below min_width_mm, or None: not in a relative camera model's units, nor at a
+        ceiling (the bead may be wider than it reads)."""
+        cfg = self.cfg
+        if estimate is None or estimate.get("relative") or estimate.get("at_ceiling") or \
+                not all(_finite(estimate.get(k)) for k in ("mm", "confidence", "age_ms")) or \
+                estimate["age_ms"] > cfg["max_estimate_age_ms"] or estimate["confidence"] < cfg["min_confidence"] or \
+                estimate["mm"] >= cfg["min_width_mm"]:
+            return None
+        return f"alarm: below {cfg['min_width_mm']:.2f} mm (walls may not touch)"
+
+    def _step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto):
         cfg = self.cfg
         mode = "auto" if auto else "advise"
-        # A gap in the data (no, stale or weak estimate) pauses the persistence count; anything else restarts it.
-        outside, self._outside = self._outside, 0
         if auto and not self._auto:
             self._arm(now_ms)
         self._auto = auto
         setpoints, measured, context = setpoints or {}, measured or {}, context or {}
         self._readbacks(now_ms, setpoints)
+        # A tick without data to judge pauses the run of estimates off target; any other hold, or a change the
+        # readbacks just showed, starts it over.
+        off, self._off = self._off, None
         self._proposal = None
         bad = self._non_finite(estimate, target_mm, setpoints, measured)
         if bad:
@@ -335,6 +361,10 @@ class Controller:
         def hold(reason, candidates=(), predicted=None):
             return Decision(now_ms, mode, None, reason, error, predicted, list(candidates), True)
 
+        def pause(reason):
+            self._off = off
+            return hold(reason)
+
         if target_mm is None:
             return hold("no target")
         if cfg["mode"] == "model" and self.model is None:
@@ -345,9 +375,9 @@ class Controller:
                    if op in self.levers and now_ms - rb[1] <= cfg["readback_max_age_ms"]}
         missing = [_name(op) for op in self.levers if op not in current]
         if missing:
-            return hold(f"no readback for {', '.join(missing)}")
+            return pause(f"no readback for {', '.join(missing)}")
         if measured.get("extruding") is not True:
-            return hold("not extruding")
+            return pause("not extruding")
         layer = context.get("layer")
         if layer is None or layer < cfg["min_layer"]:
             return hold(f"first layers ({layer if layer is not None else '?'} of {cfg['min_layer']})")
@@ -359,8 +389,7 @@ class Controller:
         elif estimate["confidence"] < cfg["min_confidence"]:
             gap = f"low confidence ({estimate['confidence']:.2f})"
         if gap:
-            self._outside = outside
-            return hold(gap)
+            return pause(gap)
         nozzle, nozzle_target = measured.get("nozzle_c"), setpoints.get("nozzle_temperature_c")
         if _finite(nozzle) and _finite(nozzle_target) and abs(nozzle - nozzle_target) > HEATER_SETTLED_C:
             self._heating_ms = now_ms
@@ -377,6 +406,7 @@ class Controller:
             self._recent.popleft()
         self._judge_widening(now_ms)
         ceiling = estimate.get("ceiling_mm")
+        at_ceiling = ceiling is not None and bool(estimate.get("at_ceiling"))
         if ceiling is not None and target_mm > ceiling:
             return hold(f"alarm: target {target_mm:.2f} mm is above what the camera can see ({ceiling:.2f} mm)")
         if now_ms < self._foreign_until:
@@ -384,10 +414,9 @@ class Controller:
         if self._cmd:
             return hold(self._waiting(estimate))
         if self._since is not None and (estimate.get("since_ms") or -math.inf) < self._since:
-            return hold("waiting for a fresh estimate")
+            return pause("waiting for a fresh estimate")
         if self._needs_views(estimate):
-            self._outside = outside
-            return hold("waiting for a second view")
+            return pause("waiting for a second view")
         try:
             self._anchor(now_ms, current, measured, context, estimate)
         except ModelFailure as e:
@@ -397,17 +426,23 @@ class Controller:
         band = max(cfg["deadband_mm"], cfg["sigma_factor"] * estimate["sigma_mm"])
         if abs(error) <= band:
             self._unreachable_steps, self._streak = 0, None
-            if estimate.get("at_ceiling"):
+            if at_ceiling:
                 seen = min(estimate["mm"], ceiling)  # the bead is at least this wide, maybe wider
                 return hold(f"at the camera's ceiling (≥ {seen:.2f} mm): can't confirm the width")
             return hold(f"on target (|error| {abs(error):.3f} <= {band:.3f} mm)")
-        if error > 0 and estimate.get("at_ceiling"):  # a wider bead would read the same: never widen blind
+        if error > 0 and at_ceiling:  # a wider bead would read the same: never widen blind
             return hold(f"at the camera's ceiling: can't see wider than {ceiling:.2f} mm")
         if error > 0 and self._saturated:
             return hold(SATURATED if auto else SATURATED_ADVISE)
-        self._outside = outside + 1
-        if self._outside < cfg["persist_ticks"]:
-            return hold(f"off target {error:+.3f} mm, confirming ({self._outside}/{cfg['persist_ticks']})")
+        sign = 1 if error > 0 else -1
+        # A run whose last estimate off target is older than persist_gap_s (a long pause, the next print) starts over.
+        if not (off and off["sign"] == sign and 0 <= now_ms - off["last_ms"] <= cfg["persist_gap_s"] * 1000):
+            off = {"sign": sign, "since_ms": now_ms, "n": 0}
+        self._off = {**off, "last_ms": now_ms, "n": off["n"] + 1}
+        span_s = (now_ms - self._off["since_ms"]) / 1000
+        if span_s < cfg["persist_s"] or self._off["n"] < cfg["persist_estimates"]:
+            return hold(f"off target {error:+.3f} mm, confirming ({math.floor(span_s)}/{cfg['persist_s']:g} s, "
+                        f"{self._off['n']}/{cfg['persist_estimates']} estimates)")
         if error > 0 and ceiling is not None:
             # With a camera that has a ceiling, widening goes from settled widths only and each step must lift the
             # width before the next: a blind plateau, at the knee or anywhere below it with a drifted IR, latches
@@ -444,7 +479,7 @@ class Controller:
             what = f"{out_of_reach}; one step: {what}"
         if auto and not gate_open:
             return hold(f"gate closed (would set {what})", candidates, predicted)
-        before = (estimate["mm"], estimate["sigma_mm"], bool(estimate.get("at_ceiling")), ceiling,
+        before = (estimate["mm"], estimate["sigma_mm"], at_ceiling, ceiling,
                   self._level(now_ms - LEVEL_S * 1000) if error > 0 and ceiling is not None else None)
         self._proposal = {"action": action, "predicted": best["predicted_change_mm"], "before": before,
                           "unreachable": not reachable}

@@ -171,6 +171,9 @@ class SensorParams:
     group_period_s: float = 10.0
     dropout_burst_len: float = 1.0  # mean run of consecutive dropouts (1 = independent); the overall rate stays `dropout`
     confidence_scale_px: float = 0.0  # >0: confidence falls as the bead's blur excess over the floor shrinks below this
+    # >0: a view's noise is AR(1) in time, correlating exp(-dt / noise_tau_s) between frames dt apart (the square of
+    # 21 Oct at 2 frames/s: 0.5 at 0.5 s, so 0.72 s); 0: independent frames
+    noise_tau_s: float = 0.0
 
 
 class Sensor:
@@ -193,6 +196,7 @@ class Sensor:
         self._t0: float | None = None
         self._history: list[tuple] = []
         self._dropped: dict = {}
+        self._noise: dict = {}  # group -> (t_s, last noise) for correlated noise
         self._frames = 0
 
     def observe(self, t_s: float, plant: Plant) -> None:
@@ -260,6 +264,12 @@ class Sensor:
         group = camera if group is None else group
         dropped = self._is_dropped(group)
         noise = self.rng.normal(0.0, p.noise_px)
+        if p.noise_tau_s > 0:
+            last = self._noise.get(group)
+            if last is not None:
+                rho = math.exp(-(t_s - last[0]) / p.noise_tau_s)
+                noise = rho * last[1] + math.sqrt(1 - rho * rho) * noise
+            self._noise[group] = (t_s, noise)
         low, high = self._transport_range()
         transport = self._xrng.uniform(low, high) if high > low else low
         true_mm, nozzle_c, speed = self._state_at(t_s, plant, transport)

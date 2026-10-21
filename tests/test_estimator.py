@@ -246,6 +246,37 @@ def test_view_offsets_are_learned_relative_and_removed():
     assert e["view_offsets_mm"] == {} and e["sigma_mm"] > 0.05  # disagreeing views widen sigma instead
 
 
+@pytest.mark.parametrize("cap", [1.0, 1.5])
+def test_views_that_disagree_widen_sigma_until_their_offsets_are_learned(cap):
+    # At 2 frames/s the random part alone is small enough for unlearned view offsets to look like a deviation.
+    rng = np.random.default_rng(3)
+    est = WidthEstimator(StubCameraModel(offsets_px={1: 1.6, 2: 1.6, 3: 1.6}), {"view_spread_cap": cap})
+    true_offsets = {1: 0.15, 2: -0.15, 3: 0.0}
+    early, late = [], []
+    for i in range(600):
+        t = i / 2
+        group = 1 + int(t // 10) % 3
+        est.add(sample(t, 1.5 + true_offsets[group] + rng.normal(0, 0.05), group=group), 220, 20)
+        e = est.estimate(now(t))
+        if e and len(e["per_group"]) > 1:
+            random = 1 / math.sqrt(sum(p["sigma_mm"] ** -2 for p in e["per_group"].values()))
+            (early if t < 50 else late if t > 200 else []).append(e["sigma_mm"] / random)
+    assert min(early) > 2  # offsets still being learned: the views' disagreement counts in full
+    assert min(late) >= 1 - 1e-9 and max(late) <= cap + 1e-9  # learned: at most the cap
+
+
+def test_frames_less_than_a_second_apart_count_once_in_sigma_but_all_in_the_mean():
+    # On the square at 2 frames/s, frames 0.5 s apart correlated 0.5: two of them say little more than one.
+    values = noisy(40, seed=4)
+    bucketed = fed(values, step_s=0.5).estimate(now(19.5))
+    every = fed(values, step_s=0.5, est=WidthEstimator(CAM, {"sigma_bucket_s": 0})).estimate(now(19.5))
+    assert bucketed["mm"] == pytest.approx(every["mm"]) and bucketed["n"] == every["n"] == 40
+    assert bucketed["sigma_mm"] == pytest.approx(every["sigma_mm"] * math.sqrt(40 / 21))  # 21 distinct seconds
+    at_1_hz = fed(values[:20]).estimate(now(19))
+    assert at_1_hz["sigma_mm"] == pytest.approx(
+        fed(values[:20], est=WidthEstimator(CAM, {"sigma_bucket_s": 0})).estimate(now(19))["sigma_mm"])
+
+
 def test_groups_active_counts_views_seen_in_the_last_minute():
     est = WidthEstimator(CAM)
     for i in range(90):

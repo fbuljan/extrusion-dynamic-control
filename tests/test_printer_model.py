@@ -136,7 +136,7 @@ def test_signatures_match_the_stub(name):
 
 
 def test_controller_moves_flow_the_right_way(m):
-    c = Controller(m, {"persist_ticks": 1})
+    c = Controller(m, {"persist_s": 0, "persist_estimates": 1})
     sp = {"flow_percent": 100.0, "speed_override_percent": 100.0, "nozzle_temperature_c": 220.0}
     for mm, sign in ((1.35, 1), (1.75, -1)):
         est = {"mm": mm, "sigma_mm": 0.02, "n": 10, "age_ms": 500, "confidence": 0.9, "per_camera": {}, "since_ms": 0}

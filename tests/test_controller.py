@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from server import control_config
-from server.controller import ALL, LEVEL_S, Controller
+from server.controller import ALL, LEVEL_S, Controller, lead_with
 from server.estimator import WidthEstimator
 from server.model_stubs import StubCameraModel, StubPrinterModel
 from tools.sim.plant import T0_MS, Gateway, Plant, PlantParams, Sensor, SensorParams, SimHarness
@@ -174,6 +174,33 @@ def glow_scenario(seed, camera=None, **kw):
     return sim(seed=seed, camera=camera, events=[(60, operator("nozzle_temperature_c", 240))], **kw)
 
 
+def blind_sides(seen_s=20.0, blind_s=10.0):
+    """The square of 21 Oct: the trailing camera sees only some of its sides, so the samples stop for blind_s out of
+    every seen_s + blind_s (with the bench's own dropouts about half of the ticks have no usable width estimate)."""
+    def setup(harness):
+        capture, period = harness.sensor._capture, seen_s + blind_s
+
+        def capture_(t_s, plant, camera, group=None, group_offset=0.0):
+            s = capture(t_s, plant, camera, group, group_offset)
+            if t_s % period >= seen_s:
+                s.update(width_px=None, contrast=0.0, confidence=0.0, reason="dropout")
+            return s
+        harness.sensor._capture = capture_
+    return setup
+
+
+def nozzle_drop(seed, hinge=False, **kw):
+    """Trial 1 of 21 Oct on the realistic bench: target 1.45 mm, the operator drops the nozzle 220 -> 200 C at 60 s (the
+    melt then carries ~1.27 mm: the walls stop touching below 1.30) and the camera sees half the square. hinge: the
+    camera model with a 1.50 mm ceiling; otherwise linear, without one."""
+    plant = {"nominal_width_mm": 1.45, "melt_width_mm": 1.9}
+    printer = StubPrinterModel(nominal_width_mm=1.45, melt_width_mm=1.9, flow_exponent=0.5)
+    camera = HINGE if hinge else {k: v for k, v in HINGE.items() if k != "knee_mm"}
+    return realistic(seed, printer=printer, target=1.45, duration_s=kw.pop("duration_s", 420),
+                     events=[(60, operator("nozzle_temperature_c", 200))], setup=kw.pop("setup", blind_sides()),
+                     **plant, **camera, **kw)
+
+
 def switching_groups(offsets_px, every_s=10.0, until_s=600.0):
     """The trailing camera follows the travel direction: a different group (with its own unknown offset) every leg."""
     def setup(harness):
@@ -276,6 +303,13 @@ def safety_violations(out, config=None):
 # unit: holds, limits, bookkeeping ------------------------------------------------------------------------------------
 SETPOINTS = {"flow_percent": 100.0, "speed_override_percent": 100.0, "nozzle_temperature_c": 220.0}
 MELTY = 1.3  # melt capacity (mm) below the bead: speed and nozzle work, flow doesn't
+NOW = {"persist_s": 0, "persist_estimates": 1}  # act on the first estimate off target
+BELOW = "alarm: below 1.30 mm (walls may not touch); "
+
+
+def seen_at(mm, reason):
+    """The reason as decided on an estimate of mm: below the minimum width the walls alarm leads it."""
+    return BELOW + reason if mm < 1.30 else reason
 
 
 class Rig:
@@ -302,7 +336,7 @@ class Rig:
 
     def act(self, mm, **kw):
         """Step through the persistence window: the first proposal, or the last hold."""
-        for _ in range(self.c.cfg["persist_ticks"] + 2):
+        for _ in range(max(math.ceil(self.c.cfg["persist_s"]) + 1, self.c.cfg["persist_estimates"]) + 2):
             d = self.step(mm, **kw)
             if d.action:
                 return d
@@ -365,7 +399,7 @@ class BrokenModel(StubPrinterModel):
     (dict(target=math.nan), "non-finite target"), (dict(flow=math.nan), "non-finite readback for flow"),
     (dict(nozzle_c=math.inf), "non-finite measured nozzle_c")])
 def test_non_finite_inputs_hold_and_say_which(change, reason):
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     r.target = change.get("target", r.target)
     if "flow" in change:
         r.sp["flow_percent"] = change["flow"]
@@ -380,7 +414,7 @@ def test_non_finite_inputs_hold_and_say_which(change, reason):
                                            (BrokenModel(), "alarm: printer model failed (ValueError: bad coefficients)")])
 @pytest.mark.parametrize("anchor", [False, True])
 def test_a_failing_printer_model_holds_with_an_alarm(model, reason, anchor):
-    r = Rig(model, config={"persist_ticks": 1, "anchor_operating_point": anchor}).armed(1.30)
+    r = Rig(model, config={**NOW, "anchor_operating_point": anchor}).armed(1.30)
     for target in (1.48, 1.10):
         r.target = target
         d = r.step(1.30)
@@ -388,7 +422,7 @@ def test_a_failing_printer_model_holds_with_an_alarm(model, reason, anchor):
 
 
 def test_fallback_mode_with_non_finite_inputs_never_raises():
-    r = Rig(None, config={"mode": "fallback", "persist_ticks": 1}).armed(1.30)
+    r = Rig(None, config={"mode": "fallback", **NOW}).armed(1.30)
     assert r.step(math.nan).reason == "non-finite width estimate mm"
     r.sp["flow_percent"] = math.inf
     assert r.step(1.30).reason == "non-finite readback for flow"
@@ -403,26 +437,140 @@ def test_readback_older_than_max_age_holds():
     assert r.step(1.3, dt_ms=3000).reason == "no readback for speed"
 
 
-def test_deadband_two_sigma_and_persistence_that_survives_data_gaps():
+def confirming(error, s, n):
+    return f"off target {error:+.3f} mm, confirming ({s}/10 s, {n}/5 estimates)"
+
+
+def test_deadband_two_sigma_and_persistence_in_estimate_time():
     r = Rig().armed(1.48)
-    assert r.c.cfg["persist_ticks"] == 10
+    assert (r.c.cfg["persist_s"], r.c.cfg["persist_estimates"]) == (10, 5)
     assert r.step(1.44).reason.startswith("on target")  # inside 0.05 mm
     assert r.step(1.40, sigma=0.05).reason.startswith("on target")  # inside 2 sigma
-    reasons = [r.step(1.30).reason for _ in range(4)] + [r.step(None).reason, r.step(1.30, confidence=0.2).reason]
-    reasons += [r.step(1.30).reason for _ in range(5)]
-    assert reasons[:4] == [f"off target +0.180 mm, confirming ({i}/10)" for i in range(1, 5)]
-    assert reasons[4:6] == ["no width estimate", "low confidence (0.20)"]  # gaps pause the count
-    assert reasons[6:] == [f"off target +0.180 mm, confirming ({i}/10)" for i in range(5, 10)]
+    reasons = [r.step(1.30).reason for _ in range(10)]
+    assert reasons == [confirming(0.18, i, i + 1) for i in range(10)]  # 5 estimates are not yet 10 s
     assert r.step(1.30).action is not None
+
+
+def test_ticks_without_a_usable_estimate_pause_the_persistence_but_never_reset_it():
+    # The square of 21 Oct: half the ticks had no usable estimate, so 10 estimates in a row took up to a minute.
     r = Rig().armed(1.48)
-    for _ in range(5):
+    assert [r.step(1.30).reason for _ in range(2)] == [confirming(0.18, 0, 1), confirming(0.18, 1, 2)]
+    gaps = [r.step(None), r.step(1.30, confidence=0.2), r.step(1.30, age_ms=6000),
+            r.step(1.30, per_group={"1": {"mm": 1.30, "sigma_mm": 0.02, "n": 10}}, groups_active=2)]
+    r.measured["extruding"] = False
+    gaps.append(r.step(1.30))
+    r.measured["extruding"] = True
+    r.sp["speed_override_percent"] = None
+    gaps.append(r.step(1.30, dt_ms=6000))
+    r.sp["speed_override_percent"] = 100.0
+    assert [d.reason for d in gaps] == ["no width estimate", "low confidence (0.20)", "width estimate stale",
+                                        "waiting for a second view", "not extruding", "no readback for speed"]
+    assert r.step(1.30).reason == confirming(0.18, 13, 3)  # past 10 s, but on 3 estimates only
+    assert r.step(1.30).reason == confirming(0.18, 14, 4)
+    assert r.step(1.30).action is not None
+
+
+@pytest.mark.parametrize("pause", ["no estimate", "not extruding"])
+def test_a_paused_run_off_target_expires_after_persist_gap_s(pause):
+    # 4 estimates off target, a pause, then one more: a layer change's blank continues the run, a long stop does not.
+    for gap_s, acts in ((20, True), (600, False)):
+        r = Rig().armed(1.48)
+        for _ in range(4):
+            r.step(1.30)
+        r.measured["extruding"] = pause != "not extruding"
+        for _ in range(gap_s):
+            r.step(None if pause == "no estimate" else 1.30)
+        r.measured["extruding"] = True
+        d = r.step(1.30)
+        assert (d.action is not None) is acts, d.reason
+        if not acts:
+            assert d.reason == confirming(0.18, 0, 1)
+    r = Rig().armed(1.48)
+    for _ in range(4):
         r.step(1.30)
-    assert r.step(1.48).reason.startswith("on target")  # back in band: starts over
-    assert r.step(1.30).reason.endswith("(1/10)")
+    assert r.step(1.30, dt_ms=-30_000).reason == confirming(0.18, 0, 1)  # a clock stepped back starts over
+
+
+def test_an_estimate_on_target_or_off_on_the_other_side_starts_the_persistence_over():
+    r = Rig().armed(1.48)
+    for _ in range(8):
+        r.step(1.30)
+    r.step(None)
+    assert r.step(1.48).reason.startswith("on target")
+    assert r.step(1.30).reason == confirming(0.18, 0, 1)
+    r = Rig().armed(1.48)
+    for _ in range(8):
+        r.step(1.30)
+    r.step(None)  # a gap doesn't carry the run over to the other side
+    assert [r.step(1.60).reason for _ in range(10)] == [confirming(-0.12, i, i + 1) for i in range(10)]
+    d = r.step(1.60)
+    assert d.action and d.candidates[0]["predicted_change_mm"] < 0
+    r = Rig().armed(1.48)
+    for _ in range(8):
+        r.step(1.30)
+    r.sp["flow_percent"] = 95.0  # someone else's change: what was seen before it says nothing about after it
+    assert r.step(1.30).reason.startswith("alarm: readback shows someone else set flow 95 %")
+    assert r.step(1.30, dt_ms=30_000).reason == confirming(0.18, 0, 1)
+
+
+def test_switching_auto_on_confirms_the_deviation_afresh():
+    r = Rig(auto=False)
+    for _ in range(8):
+        r.step(1.30)
+    r.auto = True
+    assert r.step(1.30).reason == "waiting for a fresh estimate"
+    assert r.step(1.30).reason == confirming(0.18, 0, 1)
+
+
+def test_below_the_minimum_width_the_walls_alarm_leads_and_the_controller_still_acts():
+    r = Rig(target=1.45).armed(1.25)
+    assert r.step(1.25).reason == BELOW + confirming(0.20, 0, 1)
+    d = r.act(1.25)
+    assert d.action["operation"] == "flow_percent" and not d.hold  # an alarm on the bead, not a hold
+    assert d.reason == f"{BELOW}flow 100 % -> {d.action['value']}"
+    json.dumps(d.to_dict())
+    advice = Rig(target=1.45, auto=False).act(1.25)
+    assert advice.action == d.action and advice.reason == d.reason and not advice.hold
+    r = Rig(target=1.45).armed(1.25)
+    r.sp["flow_percent"] = 95.0
+    assert r.step(1.25).reason == f"{BELOW}alarm: readback shows someone else set flow 95 %; holding 30 s"
+    r = Rig(target=None)
+    assert r.step(1.25).reason == f"{BELOW}no target"  # a print without a target still has walls
+    r = Rig(target=1.45).armed(1.25)
+    assert [r.step(1.25, confidence=0.3).reason, r.step(1.25, age_ms=6000).reason, r.step(None).reason,
+            r.step(1.30).reason] == ["low confidence (0.30)", "width estimate stale", "no width estimate",
+                                     confirming(0.15, 0, 1)]
+
+
+def test_the_minimum_width_is_config_within_bounds():
+    assert control_config.load()["min_width_mm"] == 1.30
+    r = Rig(config={"min_width_mm": 1.20}, target=1.45).armed(1.25)
+    assert r.step(1.25).reason == confirming(0.20, 0, 1)
+    r = Rig(config={"min_width_mm": 1.40}, target=1.45).armed(1.35)
+    assert r.step(1.35).reason.startswith("alarm: below 1.40 mm (walls may not touch); off target")
+    for bad in (0.7, 2.1):
+        with pytest.raises(ValueError):
+            Controller(StubPrinterModel(), {"min_width_mm": bad})
+
+
+def test_no_walls_alarm_in_a_relative_models_units_or_at_a_ceiling():
+    r = Rig(config={"min_width_mm": 1.60}, target=1.45).armed(1.25)
+    est = {"mm": 1.25, "sigma_mm": 0.02, "n": 10, "age_ms": 500, "confidence": 0.9}
+    assert r.c.walls_alarm(est) == "alarm: below 1.60 mm (walls may not touch)"
+    assert r.c.walls_alarm({**est, "relative": True}) is None  # geometric mm of the IR, not the bead
+    assert r.c.walls_alarm({**est, "mm": 1.50, "ceiling_mm": 1.50, "at_ceiling": True}) is None  # may be wider
+
+
+def test_an_alarm_of_the_reasons_own_stays_one_behind_the_walls_alarm():
+    walls = "alarm: below 1.30 mm (walls may not touch)"
+    assert lead_with(walls, "alarm: no usable lever can move the width") == \
+        f"{walls}; alarm: no usable lever can move the width"
+    assert lead_with(walls, lead_with(walls, "not sent: gate closed")) == f"{walls}; not sent: gate closed"
+    assert lead_with(None, "spacing") == "spacing"
 
 
 def test_auto_switched_on_waits_for_an_estimate_newer_than_the_switch():
-    r = Rig(config={"persist_ticks": 1})
+    r = Rig(config=NOW)
     d = r.step(1.30)
     assert d.reason == "waiting for a fresh estimate" and r.c.estimate_since() == r.t
     assert r.step(1.30, since_ms=None).reason == "waiting for a fresh estimate"
@@ -485,7 +633,7 @@ def test_rounding_bounds_and_step_limits_hold_for_any_state():
     for i in range(400):
         mode = "fallback" if i % 4 == 0 else "model"
         r = Rig(None if mode == "fallback" else StubPrinterModel(melt_width_mm=rng.uniform(1.2, 2.2)),
-                config={"mode": mode, "persist_ticks": 1}, target=rng.uniform(0.8, 2.4))
+                config={"mode": mode, **NOW}, target=rng.uniform(0.8, 2.4))
         r.sp = {"flow_percent": float(rng.uniform(50, 150)), "speed_override_percent": float(rng.uniform(40, 120)),
                 "nozzle_temperature_c": float(rng.uniform(190, 250))}
         r.measured["nozzle_c"] = r.sp["nozzle_temperature_c"] + rng.normal(0, 3)
@@ -553,7 +701,7 @@ def test_settling_waits_for_a_second_view_when_the_print_shows_several():
     two = {**one, "2": {"mm": 1.38, "sigma_mm": 0.03, "n": 3}}
     assert not r.step(1.38, n=11, per_group=two, groups_active=3).reason.startswith("waiting")
     assert r.step(1.30, per_group=one, groups_active=3).reason == "waiting for a second view"
-    assert Rig(config={"group_rule": "none", "persist_ticks": 1}).armed(1.3).step(
+    assert Rig(config={"group_rule": "none", **NOW}).armed(1.3).step(
         1.3, per_group=one, groups_active=3).action is not None
 
 
@@ -646,13 +794,13 @@ def test_advice_applied_by_hand_is_our_change_then_auto_carries_on():
 
 
 def test_note_external_pins_its_operation_and_an_unnamed_one_only_holds():
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     r.c.note_external("fan_speed_percent", 40.0, r.t)
     assert r.step(1.30).reason == "alarm: another sender set fan_speed_percent 40; holding 29 s"
     assert r.c.pinned(r.t)["fan_speed_percent"]["value"] == 40.0
     assert r.step(1.30, dt_ms=29_000).action is not None
     for lever, value in ((None, None), ("unknown", 5.0), ("flow_percent", math.nan), (None, math.nan)):
-        r = Rig(config={"persist_ticks": 1}).armed(1.30)
+        r = Rig(config=NOW).armed(1.30)
         r.c.note_external(lever, value, r.t)
         assert r.step(1.30).reason == "alarm: another sender's command was accepted; holding 29 s"
         assert r.c.pinned(r.t) == {}
@@ -660,7 +808,7 @@ def test_note_external_pins_its_operation_and_an_unnamed_one_only_holds():
 
 
 def test_rejected_command_is_not_resent_until_a_fresh_readback_explains_it():
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     d = r.step(1.30)
     r.send(d, rid=7)
     r.c.note_result(7, "rejected", r.t)
@@ -671,7 +819,7 @@ def test_rejected_command_is_not_resent_until_a_fresh_readback_explains_it():
 
 
 def test_failure_is_explained_only_by_a_readback_seen_after_it():
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     d = r.step(1.30)
     r.sp["flow_percent"] = None  # readbacks stop before the send
     r.send(d, rid=7)
@@ -685,7 +833,7 @@ def test_failure_is_explained_only_by_a_readback_seen_after_it():
 
 
 def test_rejected_value_is_forgotten_so_an_operator_setting_it_is_external():
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     d = r.step(1.30)
     r.send(d, rid=7)
     r.c.note_result(7, "rejected", r.t)
@@ -697,7 +845,7 @@ def test_rejected_value_is_forgotten_so_an_operator_setting_it_is_external():
 
 
 def test_dispatch_unknown_that_lands_later_is_ours_and_gated_from_the_landing():
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     d = r.step(1.30)
     r.send(d, rid=7)
     r.c.note_result(7, "dispatch_unknown", r.t + 500)
@@ -724,7 +872,7 @@ def test_a_value_of_ours_landing_after_its_failure_was_explained_is_still_ours()
 
 def test_an_unsent_auto_proposal_applied_by_hand_is_our_change_not_an_external_one():
     for unsent in (True, False):
-        r = Rig(config={"persist_ticks": 1}).armed(1.30)
+        r = Rig(config=NOW).armed(1.30)
         d = r.step(1.30)  # sends disabled, or the pipeline refused it
         if unsent:
             r.c.note_unsent(d.action["operation"], d.action["value"], r.t)
@@ -738,7 +886,7 @@ def test_an_unsent_auto_proposal_applied_by_hand_is_our_change_not_an_external_o
 
 def test_two_failures_in_a_row_latch_an_alarm_until_auto_is_rearmed():
     for states in (("dispatch_unknown", "queued_unconfirmed"), ("unanswered", "unanswered"), ("rejected", "rejected")):
-        r = Rig(config={"persist_ticks": 1}).armed(1.30)
+        r = Rig(config=NOW).armed(1.30)
         for rid, state in enumerate(states, 1):
             for _ in range(10):
                 d = r.step(1.30)
@@ -761,7 +909,7 @@ def test_two_failures_in_a_row_latch_an_alarm_until_auto_is_rearmed():
 
 
 def test_confirmed_but_not_applied_latches_an_alarm_until_auto_is_rearmed():
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     d = r.step(1.30)
     r.send(d, rid=1)
     r.c.note_result(1, "setting_confirmed", r.t)
@@ -779,7 +927,7 @@ def test_confirmed_but_not_applied_latches_an_alarm_until_auto_is_rearmed():
 
 
 def test_fallback_takes_a_smaller_step_instead_of_retrying_a_failed_value():
-    r = Rig(None, config={"mode": "fallback", "persist_ticks": 1}).armed(1.30)
+    r = Rig(None, config={"mode": "fallback", **NOW}).armed(1.30)
     d = r.step(1.30)
     r.send(d, rid=1)
     r.c.note_result(1, "rejected", r.t)
@@ -789,7 +937,7 @@ def test_fallback_takes_a_smaller_step_instead_of_retrying_a_failed_value():
 
 
 def test_a_late_landing_after_not_applied_is_ours_but_the_alarm_stays():
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     d = r.step(1.30)
     r.send(d, rid=7)
     r.c.note_result(7, "setting_confirmed", r.t + 500)
@@ -819,7 +967,7 @@ def test_open_loop_where_readbacks_never_follow_never_retries(printer, state):
 
 @pytest.mark.parametrize("state", ["rejected", "dispatch_unknown", "queued_unconfirmed", "unanswered"])
 def test_a_failed_value_is_never_proposed_again_until_rearmed_or_a_new_target(state):
-    r = Rig(config={"persist_ticks": 1}).armed(1.30)
+    r = Rig(config=NOW).armed(1.30)
     d = r.step(1.30)
     r.send(d, rid=1)
     if state != "unanswered":
@@ -889,11 +1037,12 @@ def test_after_a_step_the_next_needs_its_own_run_off_target_even_across_data_gap
     for _ in range(10):
         r.step(None)  # no estimate while the change takes effect
     reasons = [r.step(1.45, n=8).reason for _ in range(5)]
-    assert reasons == [f"off target +0.150 mm, confirming ({i}/10)" for i in range(1, 6)]
+    assert reasons == [confirming(0.15, i, i + 1) for i in range(5)]
 
 
 def test_lever_with_less_than_30_percent_of_the_predicted_effect_is_dropped():
     r = Rig(StubPrinterModel(melt_width_mm=2.0), target=1.5).armed(1.30)
+    assert r.ceiling is None  # a camera model without a ceiling: widening steps are judged like any other
     d = r.act(1.30)
     for i in range(2):
         assert d.action["operation"] == "flow_percent"
@@ -984,13 +1133,13 @@ def test_every_widening_step_must_show_its_effect_before_the_next(auto, mm, targ
     out = [r.step(mm, sigma=0.005) for _ in range(90)]  # the reading doesn't follow
     assert not any(o.action for o in out)
     waiting = f"waiting for flow {d.action['value']:g} % to show its effect before widening again"
-    assert waiting in {o.reason for o in out}
+    assert seen_at(mm, waiting) in {o.reason for o in out}
     latched = SATURATED if auto else SATURATED_ADVISE  # with Auto off, switching it on may send: the text says so
-    assert out[-1].reason == latched
+    assert out[-1].reason == seen_at(mm, latched)
     r.target = mm - 0.2
     assert r.act(mm, sigma=0.005).candidates[0]["predicted_change_mm"] < 0  # narrowing stays allowed
     r.target = target
-    assert r.act(mm, sigma=0.005).reason == latched  # a new target doesn't clear it
+    assert r.act(mm, sigma=0.005).reason == seen_at(mm, latched)  # a new target doesn't clear it
     if auto:
         r.auto = False
         r.step(mm, sigma=0.005)
@@ -1015,14 +1164,14 @@ def test_widening_waits_for_a_settled_width_and_narrowing_does_not():
     r = Rig(StubPrinterModel(melt_width_mm=2.2), target=1.40)
     r.ceiling = 1.50
     r.measured["nozzle_c"] = 205.0  # the heater still on its way to 220 C
-    assert [r.step(1.20).reason for _ in range(60)][-1] == "waiting for the width to settle before widening"
+    waiting = seen_at(1.20, "waiting for the width to settle before widening")
+    assert [r.step(1.20).reason for _ in range(60)][-1] == waiting
     r.measured["nozzle_c"] = 220.0
-    assert [r.step(1.20).reason for _ in range(25)][-1] == "waiting for the width to settle before widening"
+    assert [r.step(1.20).reason for _ in range(25)][-1] == waiting
     assert _settled(r, 1.20, ticks=6).act(1.20).action["operation"] == "flow_percent"
     falling = Rig(StubPrinterModel(melt_width_mm=2.2), target=1.40)
     falling.ceiling = 1.50
-    assert [falling.step(1.30 - 0.002 * i).reason for i in range(60)][-1] == \
-        "waiting for the width to settle before widening"
+    assert [falling.step(1.30 - 0.002 * i).reason for i in range(60)][-1] == waiting
     falling.target = 1.00
     assert falling.act(1.18).action["operation"] == "flow_percent"
 
@@ -1118,7 +1267,8 @@ def test_a_judgement_needs_enough_estimates_even_at_its_deadline():
     r, what = _pending()
     for _ in range(200):
         r.step(None)
-    assert r.step(1.30, sigma=0.005).reason == f"waiting for enough width estimates to judge {what}"
+    out = [r.step(1.30, sigma=0.005) for _ in range(11)]  # after so long a gap the run off target starts over
+    assert out[-1].reason == f"waiting for enough width estimates to judge {what}"
     out = [r.step(1.30, sigma=0.005) for _ in range(20)]
     assert out[-1].reason == SATURATED
 
@@ -1132,6 +1282,41 @@ def test_a_view_seen_for_a_short_while_is_less_certain():
         r.step(1.40, per_group=views, groups_active=2)
     level = r.c._level(r.t - 40_000)
     assert level["b"][1] > 1.1 * level["a"][1]
+
+
+def test_without_a_ceiling_widening_goes_like_narrowing_even_while_the_heater_moves():
+    # A linear camera model reports no ceiling: no at-ceiling holds, no settled width, heater or response to wait for.
+    r = Rig(StubPrinterModel(melt_width_mm=2.2), target=1.70).armed(1.55)
+    assert r.ceiling is None
+    r.sp["nozzle_temperature_c"] = 200.0  # the operator drops the nozzle; the heater takes a while to follow
+    r.measured["nozzle_c"] = 212.0
+    changed = r.t + 1000
+    assert r.step(1.55).reason.startswith("alarm: readback shows someone else set nozzle 200 °C; holding 30 s")
+    r.t += 28_000
+    d = r.act(1.55)
+    assert d.action and d.candidates and d.predicted_mm > 1.55
+    assert r.t - changed <= 30_000 + 11_000  # the foreign hold, then only the persistence
+    mm = 1.55 + (d.predicted_mm - 1.55) * 0.8
+    reasons = []
+    r.send(d)
+    r.sp[d.action["operation"]] = float(d.action["value"])
+    r.c.note_result(1, "setting_confirmed", r.t)
+    for _ in range(20):
+        d2 = r.step(mm, n=8)
+        if d2.action:
+            break
+        reasons.append(d2.reason)
+    assert d2.action and d2.predicted_mm > mm and r.c._widen is None
+    assert not any("ceiling" in why or "settle" in why or "show its effect" in why or "heater" in why
+                   for why in reasons)
+
+
+def test_an_estimate_flagged_at_the_ceiling_without_a_ceiling_is_not_at_one():
+    r = Rig(StubPrinterModel(melt_width_mm=2.2), config=NOW, target=1.70).armed(1.55)
+    est = {"mm": 1.55, "sigma_mm": 0.02, "n": 10, "age_ms": 500, "confidence": 0.9, "per_group": {},
+           "groups_active": 1, "since_ms": r.c.estimate_since(), "ceiling_mm": None, "at_ceiling": True}
+    d = r.c.step(r.t + 1000, est, 1.70, dict(r.sp), dict(r.measured), dict(r.context), True, True)
+    assert d.action and d.predicted_mm > 1.55
 
 
 def test_steps_down_from_above_the_knee_show_nothing_at_first_and_keep_the_lever():
@@ -1280,7 +1465,8 @@ def test_failed_requests_are_never_resent_and_two_in_a_row_alarm():
     assert safety_violations(out) == []
     out = clog_scenario(0, forced={1: "rejected", 2: "dispatch_unknown"})
     assert len(out["loop"].sent) == 2
-    assert out["loop"].decisions[-1][0].reason.startswith("alarm: 2 commands in a row failed")
+    last = out["loop"].decisions[-1]
+    assert last[0].reason.startswith(seen_at(last[1]["mm"], "alarm: 2 commands in a row failed"))
 
 
 def test_nothing_is_sent_with_auto_off():
@@ -1399,8 +1585,30 @@ def test_demo_hold_current_then_a_nozzle_drop_is_restored_to_the_ceilings_margin
 
 
 # closed loop on SimHarness.realistic (print-2 physics, blur floor, three views, transport, skew, failed results) --------
-def test_realistic_do_no_harm():
-    runs = [realistic(seed, duration_s=600) for seed in range(20)]
+# LEAM's IR rate before and after 21 Oct ~13:22; on the square frames 0.5 s apart correlated 0.5
+@pytest.mark.parametrize("sensor", [{"rate_hz": 1.0}, {"rate_hz": 2.0}, {"rate_hz": 2.0, "noise_tau_s": 0.72}],
+                         ids=["1 Hz", "2 Hz", "2 Hz correlated"])
+def test_realistic_nozzle_drop_with_half_the_estimates_missing_is_corrected_without_a_ceiling(sensor):
+    # Trial 1 of 21 Oct (camera model with a ceiling) took ~2 min to act and one step only; without a ceiling the same
+    # disturbance, with about half of the ticks lacking an estimate, is caught as the bead narrows.
+    for seed in range(10):
+        out = nozzle_drop(seed, **sensor)
+        t, w = out["t_s"], out["true_mm"]
+        sent = [(s[0] - T0_MS) / 1000 - 60 for s in out["loop"].sent if s[0] >= T0_MS + 60_000]
+        ticks = [d for d, *_ in out["loop"].decisions]
+        gaps = sum(d.reason.startswith(("no width estimate", "low confidence")) for d in ticks) / len(ticks)
+        back = converged_at(out, 60, band=0.05, hold_s=30.0)
+        assert 0.3 <= gaps <= 0.65, gaps  # fewer weak estimates at 2 Hz
+        assert sent and sent[0] <= 80 and len(sent) >= 3, sent  # ~1.27 mm back to 1.45 takes three steps
+        assert np.sum((t >= 60) & (w < 1.30)) * 0.1 <= 20
+        assert back is not None and back - 60 <= 180, back
+        assert lever_moves(out, "nozzle_temperature_c") == 20  # only the operator's change
+        assert safety_violations(out) == []
+
+
+@pytest.mark.parametrize("rate_hz", [1.0, 2.0])
+def test_realistic_do_no_harm(rate_hz):
+    runs = [realistic(seed, duration_s=600, rate_hz=rate_hz) for seed in range(20)]
     commands = [len(out["loop"].sent) for out in runs]
     assert np.median(commands) <= 1, commands
     assert sum(abs(out["true_mm"][-1] - out["target"]) <= 0.08 for out in runs) >= 18
