@@ -48,7 +48,7 @@ LEAM's levels — work in this order:
 
 | Path | What |
 |---|---|
-| `app/` | **The dashboard app** (runs on the edge device): FastAPI + MQTT bridge (`server/`), pages in `static/` — `index.html` (IR view, width/target/Auto, metrics, flow/PA controls) and `monitor.html` (IR, all topics, live graphs). IR shown raw, unprocessed. Device port 18081 |
+| `app/` | **The dashboard app** (runs on the edge device): FastAPI + MQTT bridge (`server/`), pages in `static/` — `index.html` (IR view, width/target/Auto, metrics, flow/PA controls), `test.html` (Test bench: width over time, zone, Auto loop, lever tuning, manual tests) and `monitor.html` (IR, all topics, live graphs). IR shown raw, unprocessed. Device port 18081 |
 | `tools/mqtt/` | `probe.py` (who's talking, how fast), `record.py` (save telemetry, IR metadata only), `replay.py` (play a recording onto a local broker) |
 | `app/server/` width loop | `width.py` (IR px) → `camera_model.py` (real mm) → `estimator.py` → `controller.py` (+ `printer_model.py`, `control_config.py`) → `pipeline.py`; how it works and how to run it: `docs/prototype.md` |
 | `tools/model/` | `width_check.py` (widths per frame), `dataset.py` (frames + bands + go/no-go gate), `fit_camera.py`, `fit_printer.py` → `app/models/*.json` (gitignored) |

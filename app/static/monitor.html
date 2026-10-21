@@ -5,14 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Topics &amp; Graphs</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="app.css?v=0.2.0">
+  <link rel="stylesheet" href="app.css?v=0.6.0">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="silk">DEMEX</span> Graphs &amp; topics <span id="version" class="ver"></span></div>
+  <div class="brand"><span class="silk">DEMEX</span> Extrusion Monitor <span id="version" class="ver"></span></div>
+  <nav class="tabs" aria-label="Pages">
+    <a href="./">Console</a><a href="test.html">Test bench</a><a href="monitor.html" aria-current="page">Graphs &amp; topics</a>
+  </nav>
   <div class="leds"><span id="st-reader" class="led" data-state="off">reader</span></div>
   <span id="topic-count" class="program"></span>
-  <a class="btn" href="./">← Console</a>
 </header>
 
 <div class="monitor-grid">
@@ -45,7 +47,7 @@
 </div>
 
 <script src="vendor/chart.umd.min.js"></script>
-<script src="common.js?v=0.2.0"></script>
-<script src="monitor.js?v=0.2.0"></script>
+<script src="common.js?v=0.6.0"></script>
+<script src="monitor.js?v=0.6.0"></script>
 </body>
 </html>

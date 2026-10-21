@@ -325,8 +325,10 @@ function renderTarget(force = false) {
   const t = control.target_mm;
   if (force || (!targetEdited && !targetBusy)) targetEl.value = isNum(t) ? +t.toFixed(3) : "";  // busy: an older poll mustn't undo the post
   if (!$("#target-sub").dataset.state) {
-    $("#target-sub").textContent = !up ? "controller offline" : [isNum(t) ? "setpoint" : "no target", rel ? "relative" : "",
-      isNum(control.ceiling_mm) ? `max ${fmt(control.ceiling_mm, 2)}` : ""].filter(Boolean).join(" · ");
+    const d = isNum(control.limits?.band_default_mm) ? control.limits.band_default_mm : 0.05;
+    const below = isNum(control.band_below_mm) ? control.band_below_mm : d, above = isNum(control.band_above_mm) ? control.band_above_mm : d;
+    $("#target-sub").textContent = !up ? "controller offline" : [isNum(t) ? `zone ${fmt(t - below, 2)}–${fmt(t + above, 2)}` : "no target",
+      rel ? "relative" : "", isNum(control.ceiling_mm) ? `max ${fmt(control.ceiling_mm, 2)}` : ""].filter(Boolean).join(" · ");
   }
 }
 

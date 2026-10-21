@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Test bench</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="app.css?v=0.6.0">
+</head>
+<body class="bench-page" data-link="offline">
+<header class="topbar">
+  <div class="brand"><span class="silk">DEMEX</span> Extrusion Monitor <span id="version" class="ver"></span></div>
+  <nav class="tabs" aria-label="Pages">
+    <a href="./">Console</a><a href="test.html" aria-current="page">Test bench</a><a href="monitor.html">Graphs &amp; topics</a>
+  </nav>
+  <div class="leds">
+    <span id="st-reader" class="led" data-state="off">reader</span>
+    <span id="st-writer" class="led" data-state="off">writer</span>
+    <span id="st-ir" class="led" data-state="off" title="IR frames reaching this page">IR</span>
+    <span id="st-loop" class="led" data-state="off" title="The control loop's last step">loop</span>
+  </div>
+</header>
+
+<div class="offline-banner" id="offline" role="alert" hidden></div>
+
+<section class="deck" aria-label="Width, zone and Auto">
+  <div class="dial" id="dial" data-zone="none">
+    <span class="silk">Width now</span>
+    <span class="value" id="w-value">—</span>
+    <span class="sub"><span id="w-led" class="led" data-state="off">no estimate</span><span id="w-delta"></span></span>
+  </div>
+
+  <div class="zone" id="zone">
+    <div class="zone-fields">
+      <label class="zf"><span class="silk">Min</span>
+        <input id="z-min" type="number" step="0.01" inputmode="decimal" aria-describedby="z-min-rel"><small id="z-min-rel"></small></label>
+      <label class="zf zf-target"><span class="silk">Target</span>
+        <input id="z-target" type="number" step="0.01" inputmode="decimal"><small id="z-target-rel">mm</small></label>
+      <label class="zf"><span class="silk">Max</span>
+        <input id="z-max" type="number" step="0.01" inputmode="decimal" aria-describedby="z-max-rel"><small id="z-max-rel"></small></label>
+      <div class="zone-chips" role="group" aria-label="Zone presets">
+        <button class="chip" type="button" data-band="0.03">±0.03</button>
+        <button class="chip" type="button" data-band="0.05">±0.05</button>
+        <button class="chip" type="button" data-band="0.10">±0.10</button>
+        <button class="chip" type="button" id="z-hold" title="Target := the width measured now; the zone moves with it">Hold now</button>
+      </div>
+    </div>
+    <div class="zone-meter" id="zone-meter" aria-hidden="true">
+      <div class="zm-track"><div class="zm-band"></div><div class="zm-walls"></div><div class="zm-target"></div>
+        <div class="zm-needle"><i></i></div></div>
+      <div class="zm-scale"></div>
+    </div>
+    <div class="zone-msg" id="zone-msg" role="status"></div>
+  </div>
+
+  <div class="arm-bay">
+    <button class="arm" id="auto" type="button" role="switch" aria-checked="false" aria-label="Auto control" disabled>
+      <span class="silk">Auto</span></button>
+    <div class="arm-leds">
+      <span id="auto-led" class="led" data-state="off">—</span>
+      <span id="send-led" class="led" data-state="off">sends ?</span>
+      <span id="gate-led" class="led" data-state="off">gate ?</span>
+    </div>
+    <div id="auto-msg" class="zone-msg" role="status"></div>
+  </div>
+
+  <figure class="cam thumb" id="cam-ir" data-kind="ir">
+    <img id="ir" alt="Thermal camera, raw">
+    <figcaption id="ir-label" class="tally" data-state="none">IR · waiting</figcaption>
+    <span id="ir-empty" class="empty">No IR</span>
+  </figure>
+</section>
+
+<main class="bench" id="bench">
+  <section class="scope" aria-label="Width and settings over time">
+    <div class="scope-head">
+      <h2 class="silk">Width · <span id="win-label">last 10 min</span></h2>
+      <ul class="legend" aria-label="Legend">
+        <li><i class="k-width"></i>width</li><li><i class="k-sigma"></i>± noise</li><li><i class="k-target"></i>target</li>
+        <li><i class="k-zone"></i>your zone</li><li><i class="k-walls"></i>1.30 walls</li><li><i class="k-auto"></i>Auto on</li>
+        <li><i class="k-mark k-m-auto"></i>Auto cmd</li><li><i class="k-mark k-m-you"></i>you</li><li><i class="k-mark k-m-out"></i>outside</li>
+      </ul>
+      <div class="chips" role="group" aria-label="Time window">
+        <button class="chip" type="button" data-win="5">5 min</button>
+        <button class="chip" type="button" data-win="10">10 min</button>
+        <button class="chip" type="button" data-win="15">15 min</button>
+      </div>
+    </div>
+    <div class="plot plot-main"><canvas id="c-width" aria-label="Width over time"></canvas></div>
+    <div class="plot plot-small"><span class="plot-name silk">Flow <small>%</small></span><canvas id="c-flow" aria-label="Flow over time"></canvas></div>
+    <div class="plot plot-small"><span class="plot-name silk">Speed <small>%</small></span><canvas id="c-speed" aria-label="Speed over time"></canvas></div>
+    <div class="plot plot-small plot-last"><span class="plot-name silk">Nozzle <small>°C · target, actual</small></span>
+      <canvas id="c-nozzle" aria-label="Nozzle temperature over time"></canvas></div>
+  </section>
+
+  <div class="splitter" id="rail-splitter" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize side panel"></div>
+
+  <aside class="rail">
+    <section class="loop" id="loop" data-state="idle" aria-label="What Auto is doing">
+      <div class="rack-head"><span class="silk">Auto loop</span><span id="loop-mode" class="mode-chip">—</span></div>
+      <ol class="steps" id="steps"></ol>
+      <div class="loop-alarm" id="loop-walls" hidden></div>
+      <p class="loop-title" id="loop-title">Waiting for the control loop</p>
+      <p class="loop-detail" id="loop-detail"></p>
+      <div class="loop-progress" id="loop-progress" hidden><div></div></div>
+      <p class="loop-raw mono" id="loop-raw"></p>
+      <p class="loop-last" id="loop-last"></p>
+    </section>
+
+    <section class="levers" aria-label="Levers">
+      <div class="rack-head"><span class="silk">Levers</span><span class="muted" id="lever-hint"></span></div>
+      <div id="lever-rows"></div>
+      <p class="lever-note" id="lever-note"></p>
+    </section>
+
+    <section class="events-box" aria-label="Events">
+      <div class="rack-head"><span class="silk">Events</span><span class="muted" id="events-count"></span></div>
+      <ul class="events" id="events"></ul>
+    </section>
+  </aside>
+</main>
+
+<script src="vendor/chart.umd.min.js"></script>
+<script src="common.js?v=0.6.0"></script>
+<script src="test.js?v=0.6.0"></script>
+</body>
+</html>

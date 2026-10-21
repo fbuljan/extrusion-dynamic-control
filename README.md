@@ -11,7 +11,7 @@ next. See `CLAUDE.md` for the mission, rules and layout.
 ```sh
 cd app && uv venv && uv pip install -r requirements.txt
 set -a && . ../.env && set +a                       # broker host/users; passwords can also be entered in the UI
-.venv/bin/uvicorn server.main:app --port 8765       # open http://127.0.0.1:8765 (main) and /monitor.html
+.venv/bin/uvicorn server.main:app --port 8765       # open http://127.0.0.1:8765 (main), /test.html and /monitor.html
 tools/edge/build-app.sh app 0.1.0                    # from the repo root → app/dist/hello-edge_0.1.0.app for the device
 ```
 

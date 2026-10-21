@@ -5,11 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Extrusion Monitor</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="app.css?v=0.2.0">
+  <link rel="stylesheet" href="app.css?v=0.6.0">
 </head>
 <body class="console-page">
 <header class="topbar">
   <div class="brand"><span class="silk">DEMEX</span> Extrusion Monitor <span id="version" class="ver"></span></div>
+  <nav class="tabs" aria-label="Pages">
+    <a href="./" aria-current="page">Console</a><a href="test.html">Test bench</a><a href="monitor.html">Graphs &amp; topics</a>
+  </nav>
   <div class="leds">
     <span id="st-reader" class="led" data-state="off">reader</span>
     <span id="st-writer" class="led" data-state="off">writer</span>
@@ -17,7 +20,6 @@
     <span id="st-gateway" class="led" data-state="off">gateway</span>
   </div>
   <span id="program" class="program" title="Active print program"></span>
-  <button class="btn" onclick="window.open('monitor.html', 'monitor', 'width=1500,height=950')">Graphs &amp; topics ↗</button>
   <button class="btn" id="open-settings">Settings</button>
 </header>
 
@@ -109,7 +111,7 @@
   </form>
 </dialog>
 
-<script src="common.js?v=0.2.0"></script>
-<script src="main.js?v=0.2.0"></script>
+<script src="common.js?v=0.6.0"></script>
+<script src="main.js?v=0.6.0"></script>
 </body>
 </html>
