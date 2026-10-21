@@ -12,6 +12,8 @@ Siemens Industrial Edge `.app`, and talks MQTT.
 **End state: everything runs on the edge device** (ingest, measurement, alerts, dashboard, logging, control).
 Laptops are for development against recordings; anything that only works on a laptop isn't done.
 
+**Team milestones I–IX: `docs/milestones.md`** (current one marked there).
+
 LEAM's levels — work in this order:
 1. **Measure** — width vs an independent reference. A reliable measurement prototype is a complete result.
 2. **Correct** — gradual flow feedback, no oscillation.
@@ -48,7 +50,11 @@ LEAM's levels — work in this order:
 |---|---|
 | `app/` | **The dashboard app** (runs on the edge device): FastAPI + MQTT bridge (`server/`), pages in `static/` — `index.html` (IR primary, RGB inset, metrics, flow/PA controls) and `monitor.html` (IR, all topics, live graphs). IR shown raw, unprocessed. Device port 18081 |
 | `tools/mqtt/` | `probe.py` (who's talking, how fast), `record.py` (save telemetry + RGB), `replay.py` (play a recording onto a local broker) |
-| `docs/` | Team knowledge, index in `docs/README.md`: `SOURCE_OF_TRUTH.md`, `mqtt-and-telemetry.md`, `cameras-and-calibration.md`, `control.md`, `edge-deployment.md`, `decisions.md`, `experiments.md` |
+| `app/server/` width loop | `width.py` (IR px) → `camera_model.py` (real mm) → `estimator.py` → `controller.py` (+ `printer_model.py`, `control_config.py`) → `pipeline.py`; how it works and how to run it: `docs/prototype.md` |
+| `tools/model/` | `width_check.py` (widths per frame), `dataset.py` (frames + bands + go/no-go gate), `fit_camera.py`, `fit_printer.py` → `app/models/*.json` (gitignored) |
+| `tools/sim/` | `plant.py` (simulated printer + sensor + gateway for controller tests), `fake_gateway.py` (loopback-only stand-in for LEAM's gateway) |
+| `tests/` | `.venv/bin/python -m pytest tests -q`; tests needing recordings skip without `data/` |
+| `docs/` | Team knowledge, index in `docs/README.md`: `SOURCE_OF_TRUTH.md`, `mqtt-and-telemetry.md`, `cameras-and-calibration.md`, `control.md`, `edge-deployment.md`, `decisions.md`, `experiments.md`, `prototype.md` |
 | `.claude/skills/` | Shared agent skills: `experiment`, `fan-out` |
 | `data/` | Local recordings and calibration files — gitignored |
 
