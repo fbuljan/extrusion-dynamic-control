@@ -37,7 +37,8 @@ LEAM's levels — work in this order:
 
 ## Hard rules
 
-- **IR images are never persisted** — no files, logs, caches, datasets, screenshots. Process them in memory only.
+- **IR images are never persisted by the app** — no files, logs, caches, datasets, screenshots; it processes them in memory
+  only. The one exception is the team's local calibration recordings (D10/D13): `data/` on a laptop, never in git.
   RGB frames and scalar telemetry may be recorded. (Organiser rule.)
 - **Nothing is sent to the printer** without the team lead's explicit go-ahead. Default mode is detect and advise.
 - **This repo is public.** No credentials, broker addresses, organiser documents or calibration files in git.
