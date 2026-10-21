@@ -7,14 +7,14 @@ product
 ## Users
 
 The team running experiments at LEAM's mini delta printer during the Siemens × LEAM hackathon: two or three engineers
-standing at the bench with laptops, watching the thermal and RGB cameras while they deliberately push flow, pressure
+standing at the bench with laptops, watching the thermal camera while they deliberately push flow, pressure
 advance, nozzle temperature, speed and fans to provoke extrusion defects for a training dataset. The same screen is what
 we demo to LEAM and Siemens judges, sometimes on a projector. Glances last seconds; sessions last hours.
 
 ## Product Purpose
 
-Extrusion Monitor runs on the Siemens Industrial Edge device next to the printer. It shows the live IR and RGB camera
-feeds, every telemetry value the printer publishes, and lets the team send absolute corrections through LEAM's command
+Extrusion Monitor runs on the Siemens Industrial Edge device next to the printer. It shows the live IR camera
+feed, every telemetry value the printer publishes, and lets the team send absolute corrections through LEAM's command
 gateway. Success means nobody ever misreads the printer: stale or invalid data is never shown as current, a sent
 command's real outcome is obvious, and the operator can provoke a defect and see its effect within seconds.
 

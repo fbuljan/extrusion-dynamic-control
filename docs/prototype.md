@@ -10,8 +10,8 @@ the models are fitted on them and print 2 is the profile the app runs on.
 
 ## In plain words
 
-Once a second the app looks at the IR camera behind the nozzle, measures how wide the fresh bead looks in pixels, and
-turns that into millimetres with a model fitted to our calliper readings. It compares the result with the target width
+About twice a second (LEAM's IR rate since 21 Oct) the app looks at the IR camera behind the nozzle, measures how wide
+the fresh bead looks in pixels, and turns that into millimetres with a model fitted to our calliper readings. It compares the result with the target width
 the operator set. If the bead is off by more than the noise for long enough, it picks the cheapest setting to change
 (flow first, then speed, then nozzle temperature), sizes the step with a small physics model of the printer, and shows it
 as advice. Only when Auto is switched on **and** sending is enabled on the device does it send that step to the
@@ -33,7 +33,7 @@ real mm per sample
   │  estimator.py                   rolling robust estimate per view, views combined; relative view offsets learned
   ▼
 estimate: mm, sigma, model sigma, confidence, age, at_ceiling             ◄── operator target (mm)
-  │  controller.py + printer_model.py     once a second: hold, or one setting change sized by the model
+  │  controller.py + printer_model.py     decides once a second (IR ~2 frames/s): hold, or one setting change
   ▼                                        reads settings from the telemetry readbacks, never from what it last sent
 decision (advice)  ──►  dashboard (WebSocket), SQLite log (scalars only)
   │  pipeline.py → bridge.py        only if Auto ∧ CONTROL_SEND_ENABLED ∧ every send check (below)
@@ -46,8 +46,8 @@ request to LEAM's gateway (schema 0.2.0, ≥ 2 s apart)
 | Ingest | `app/server/bridge.py` (hook), `pipeline.py` | One worker measures the newest IR frame and drops older waiting ones. IR bytes live only in that slot and the worker's locals |
 | Width | `width.py`, `geometry.py` | Rejects with a reason: no timestamp, turning (distance since the corner, not time), ambiguous or too-wide ridge. Readings near the blur floor get low confidence. Never raises |
 | Camera model | `camera_model.py` | Hinge model per (camera, heading) group; groups without a fit give nothing (D23, D33) |
-| Estimate | `estimator.py` | Trimmed mean per view, inverse-variance across views; `sigma_mm` is random noise only, the calibration error is `model_sigma_mm` |
-| Control | `controller.py`, `control_config.py` | Pure logic, no I/O. Limits and costs in config (D30). `mode: fallback` is a flow-only proportional controller that needs no printer model |
+| Estimate | `estimator.py` | Trimmed mean per view over every frame, inverse-variance across views; `sigma_mm` is random noise with at most one frame per second counting (`sigma_bucket_s`: at 2 frames/s neighbours correlate ~0.5), widened by the views' disagreement until their offsets are learned (`harmonize_s`; after that by at most `view_spread_cap`, default 1 = not at all); the calibration error is `model_sigma_mm` |
+| Control | `controller.py`, `control_config.py` | Pure logic, no I/O. Limits, costs and thresholds in config (D30): `deadband_mm` 0.05, `persist_s` 10 / `persist_estimates` 5 / `persist_gap_s` 30, `min_width_mm` 1.30 (the walls alarm, 0.8–2.0). `mode: fallback` is a flow-only proportional controller that needs no printer model |
 | Printer model | `printer_model.py` | numpy forward and inversion of the fitted physics model |
 | State | `control_state.py`, `store.py` | Target persisted in `DATA_DIR/control.json`; Auto memory-only. `DATA_DIR/prototype.db` holds scalars only |
 | Dashboard | `app/static/` | Width / target / Δ with **Hold current width**, Auto switch, "sends" LED, decision line with a *Why*, pinned levers, models LED, width-vs-target chart with the camera ceiling. At the ceiling the width and Δ are shown as lower bounds ("≥") |
@@ -58,9 +58,21 @@ clocks directly; an offset beyond 2 s holds everything with an alarm.
 
 **When the controller holds** (it says why on the dashboard): no target, a model or view missing, estimate stale
 (> 5 s) or confidence < 0.5, fewer than two views in the window, not extruding, first 6 layers, Auto just switched
-on, gate closed, a lever still settling, the error inside the deadband (0.05 mm, or 2 sigma) or not persistent for
-10 ticks, widening wanted while the estimate is at the camera's ceiling, no lever able to move the width (alarm).
-Costs: flow 1, speed 3, nozzle 10. Effect delays: flow and speed 3 s, nozzle 30 s.
+on, gate closed, a lever still settling, the error inside the deadband (0.05 mm, or 2 sigma) or not yet persistent,
+widening wanted while the estimate is at the camera's ceiling, no lever able to move the width (alarm). Costs: flow 1,
+speed 3, nozzle 10. Effect delays: flow and speed 3 s, nozzle 30 s.
+
+**Persistent** means off target on one side for 10 s, spanned by at least 5 estimates. Ticks without a usable estimate
+(none, stale or weak, one view only, no readback, not extruding) count as time but not as estimates, until the last
+off-target estimate is 30 s old (`persist_gap_s`, longer than a layer change or a blind side): then the run starts over.
+It also starts over on an estimate on target or on the other side, and on any other hold: a settings change (ours or
+someone else's), spacing, a command in flight, another sender's 30 s hold, the first layers, widening latched, a
+printer-model failure, Auto switched on, and the at-ceiling holds (only with a camera model that has a ceiling).
+
+**Walls alarm** (D45): a usable estimate below `min_width_mm` (1.30 mm) puts "alarm: below 1.30 mm (walls may not
+touch)" in front of every reason the controller decides and of the pipeline's not sent, clock and target-stamp
+overrides; an alarm behind it stays one. It is an alarm, not a hold. There is none without a usable estimate (no model,
+refit, control step failed), with a relative camera model, or at a ceiling.
 
 ## Safety design
 

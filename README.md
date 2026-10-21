@@ -3,7 +3,7 @@
 Real-time extrusion bead-width measurement for LEAM's DEMEX printer, running as a Siemens Industrial Edge app.
 Built at the Siemens × LEAM hackathon, Munich, October 2026.
 
-Status: dashboard app working on the edge device (live IR/RGB, all topics + graphs, printer corrections); width measurement
+Status: dashboard app working on the edge device (live IR, all topics + graphs, printer corrections); width measurement
 next. See `CLAUDE.md` for the mission, rules and layout.
 
 ## Dashboard app (`app/`)

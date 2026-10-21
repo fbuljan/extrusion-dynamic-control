@@ -6,6 +6,8 @@ separate writer account (contract in `control.md`).
 
 ## Current mode — organiser guide update, 20 Oct ~13:30 (overrides the measurements below where they differ)
 
+- **21 Oct ~13:20: RGB removed.** LEAM stopped the RGB feed; IR on `preview/ir/trailing` now arrives at **~1.9–2.0
+  frames/s** (was ~0.9). The RGB rows below are history.
 - **Trailing-only mode.** Only `preview/rgb/trailing` and `preview/ir/trailing` publish, **at most 1 frame/s each**
   (newest eligible frame only, no backlog). The `ahead` topics are inactive. The physical camera behind the trailing
   topic changes with travel direction — never assume a fixed camera; read `camera_index` (physical number = index + 1).
@@ -58,8 +60,8 @@ Earlier measurements (before the mode change): a 20 s probe at 12:12 CEST and a 
 
 - Camera 3's own frame counter runs at ~7.4 fps; we receive ~6/s of it on whichever topic it is on. JPEG quality 91.
 - RGB previews only flow while the organisers keep their RGB viewer open with cameras selected. If RGB stops, ask them.
-- **The app subscribes to telemetry + the two RGB topics only.** IR images must never be persisted (organiser rule), and
-  we do not need them for width.
+- **The app subscribes to telemetry and the IR trailing preview** (it measures width from IR, D21 onward). IR images are
+  processed in memory only and never persisted by the app (organiser rule).
 - Command topics (writer account): we publish `demex/hackathon/mini/extrusion/request` and subscribe
   `demex/hackathon/mini/extrusion/result` and `.../status` by exact name. Note the `hackathon` vs `demo` namespace: they
   are outside the `demex/demo/mini/#` wildcard. Request schema `0.2.0`, results and status `0.1.0`; the guide asks for

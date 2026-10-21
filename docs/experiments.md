@@ -273,3 +273,29 @@ Hypothesis: a separate gain per camera view (and a height term) predicts held-ou
 Where: a candidate fit on top of `tools/model/fit_camera.py`, not installed; leave-one-band-out against the calliper, plus an estimator replay of print 2.
 Result: no. Leave-one-band-out error on print 2 below the knee: shared gain 0.070 mm, gain per view 0.076 mm (worse), gain per view + height 0.061 mm, shared gain + height 0.049 mm (6 held-out rows, less than the calliper's own scatter). cam1:-90's gain is shaky (bootstrap 95 % 0.70–2.04; 1.49 outer pass, 0.96 inner pass); its low response in the gate came mostly from the inner/outer pass mix, and at runtime it responds about 1:1. Replay with the installed model: baseline − flow 80 reads 0.175 mm (calliper 0.150), baseline − nozzle 200 reads 0.175 mm (calliper 0.199). A typed 1.40 mm target settles at about 1.40 mm real (1.38–1.42 by camera view).
 Verdict: drop (keep the shared gain). Revisit a height term once the runtime knows Z and the pass, and with more than two prints.
+
+## live-square-bands | 2026-10-21 | timebox: the square print
+Hypothesis: on a live print the deployed app's width follows setting changes in the direction and roughly the size the printer model predicts, in every camera view.
+Method: 45°-rotated square, two walls, 0.5 mm layers, app 0.4.x on the device (advice only). A script set flow / speed / nozzle every 5 layers through the writer and logged readbacks; the app's estimates came from its WebSocket, per-frame IR widths from `width_check` offline. Verdicts on the app's median over each band's settled layers against the band before (or the reference baseline).
+Result: device and offline agree within 0.02 mm. IR px shift per view (cam0:135 / cam1:-135 / cam2:-45 / cam3:45) and the app's mm:
+
+| band | IR px shift | app mm shift | printer model | verdict |
+|---|---|---|---|---|
+| flow 80 % | −0.74 / −0.64 / −0.42 / −0.70 | −0.28 | −0.15 | narrower, PASS |
+| flow 120 % (full speed) | +0.06 / +0.02 / +0.02 / −0.06 | 0.00 | +0.13 | flat: melt-limited |
+| baseline again | −0.26 / −0.27 / −0.13 / −0.24 | −0.10 | 0 | FAIL (drift) |
+| nozzle 200 °C | −0.27 / −0.43 / −0.59 / −0.55 | −0.07 | −0.16 | narrower, PASS |
+| nozzle 200 °C + speed 80 % | −0.01 / −0.12 / −0.31 / −0.02 | +0.08 (+0.15 vs nozzle-only) | 0 | recovers, PASS |
+| flow 130 % + speed 80 % | +0.42 to +0.87 in all 4 | at the 1.50 ceiling | wider | wider, PASS |
+| flow 115 % + speed 85 % | +0.42 / +0.43 / +0.29 / +0.42 | +0.16 | +0.10 | wider, PASS |
+| flow 140 % + speed 70 % | +0.91 / +0.83 / +0.87 / +0.82 | +0.23 | +0.26 | wider, PASS |
+| baseline after them | +0.00 / −0.01 / +0.02 / +0.03 | +0.01 | 0 | PASS |
+
+An estimate was on screen ~48 % of the time (morning, ~1 IR frame/s): 69 % on sides with a calibrated view, 35 % around corners, 22 % on sides with none. The baseline reading drifts down with height (1.59 mm at Z ~6, 1.42 at Z ~45).
+Verdict: adopt as live proof (rung 4) of Level 1 for narrowing and widening. The 1.50 mm knee of `camera-model-hinge` was the hot end's melt limit, not the camera: when the melt demand fits (flow % × speed % ≲ 100 %), the IR widens with flow past 1.50 mm. Open: calliper on every band (the flow 80 % size gap and the height drift), and only two of the square's four directions are calibrated.
+
+## auto-live-trials | 2026-10-21 | timebox: two runs on the square
+Hypothesis: with Auto on (sends enabled), the controller holds the bead ≥ 1.30 mm (walls touch) and within 1.40–1.50 mm through an operator nozzle drop 220 → 200 °C.
+Method: target 1.40 then 1.47 / 1.45 mm; 5 min settle, 8 min at 200 °C, 4–5 min back at 220 °C; judged on the app's own estimates (share ≥ 1.30, share in band, commands sent).
+Result: before the drop 100 % ≥ 1.30 in both. Trial 1: speed 100 → 90 % 2 min after the drop, one step; 80 % ≥ 1.30 (below on and off for ~6 min), 28 % in band. Trial 2: speed 95 % 2 min after the drop, then nothing; 43 % ≥ 1.30, 7 % in band. After the nozzle went back: 90–98 % ≥ 1.30, 67–80 % in band. Causes: half the ticks had no estimate (uncalibrated sides, corners) and the off-target counter reset on each gap; low confidence near the 1.50 mm knee; the knee's widening check (D39) waits 30–180 s per step.
+Verdict: drop the knee and count persistence in time (0.5.0); live trial 3 to judge it.
