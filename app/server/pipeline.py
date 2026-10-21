@@ -212,6 +212,7 @@ class Pipeline:
         self._trace_lock = threading.Lock()
         self._trace = deque(maxlen=int(self.cfg["trace_s"] / self.cfg["control_period_s"]))
         self._events = deque(maxlen=300)
+        self._samples = deque(maxlen=int(self.cfg["trace_s"] * 3))  # every frame's outcome, ~2 a second
         self._stop = threading.Event()
         self._threads = []
 
@@ -273,11 +274,12 @@ class Pipeline:
     def trace(self, since_ms=None):
         """Trace rows and operator events newer than since_ms (all kept without), oldest first."""
         with self._trace_lock:
-            rows, events = list(self._trace), list(self._events)
+            rows, events, samples = list(self._trace), list(self._events), list(self._samples)
         if since_ms is not None:
             rows = [r for r in rows if r["t_ms"] > since_ms]
             events = [e for e in events if e["t_ms"] > since_ms]
-        return {"rows": rows, "events": events}
+            samples = [x for x in samples if x["t_ms"] > since_ms]
+        return {"rows": rows, "events": events, "samples": samples}
 
     def note_event(self, kind, **fields):
         """An operator change for the trace: "auto", "target", "band", "levers" or "manual" (a send by hand)."""
@@ -479,7 +481,13 @@ class Pipeline:
             "t_ms": local.t_ms, "camera": sample.camera, "width_px": sample.width_px, "mm_per_px": sample.mm_per_px,
             "confidence": sample.confidence, "reason": sample.reason, "group": sample.group, "t_dep_ms": local.t_dep_ms})
         with self._est_lock:
-            self.estimator.add(local, self._nozzle_at(t), (motion or {}).get("speed_mm_s"))
+            mm = self.estimator.add(local, self._nozzle_at(t), (motion or {}).get("speed_mm_s"))
+        # Every frame's outcome for the Test bench: the width it gave, or why it gave none. Scalars only.
+        seen = jsonable({"t_ms": local.t_ms, "mm": mm, "reason": sample.reason if mm is not None or sample.reason != "ok"
+                         else "not_converted", "group": sample.group})
+        with self._trace_lock:
+            self._samples.append(seen)
+        self.emit({"type": "sample", **seen})
         self._emit_width()
         return local
 
@@ -584,9 +592,14 @@ class Pipeline:
                "extruding": measured.get("extruding"), "layer": context.get("layer"),
                "action": out.get("action"), "sent": out.get("sent"), "hold": out.get("hold"),
                "floor": out.get("floor"), "dry": out.get("dry"), "error_mm": out.get("error_mm"),
-               "predicted_mm": out.get("predicted_mm"), "reason": (out.get("reason") or "")[:TRACE_REASON_CHARS]}
+               "predicted_mm": out.get("predicted_mm"), "reason": (out.get("reason") or "")[:TRACE_REASON_CHARS],
+               "candidates": [{k: c.get(k) for k in ("operation", "value", "from", "predicted_change_mm", "score")}
+                              for c in out.get("candidates") or []],
+               "model": self.controller.sensitivity(setpoints, measured, context) if self._can_act else None}
+        row = jsonable(row)
         with self._trace_lock:
-            self._trace.append(jsonable(row))
+            self._trace.append(row)
+        self.emit({"type": "trace", **row})
 
     def _drain(self):
         while self._inbox:

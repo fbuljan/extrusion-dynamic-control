@@ -48,11 +48,15 @@ class WidthEstimator:
         self.reason = "no samples"  # why the last estimate() returned None
 
     def add(self, sample, nozzle_c, speed_mm_s):
-        """nozzle_c and speed_mm_s at the frame's time; samples that can't be converted are counted, not kept."""
+        """nozzle_c and speed_mm_s at the frame's time; samples that can't be converted are counted, not kept.
+        Returns the sample in real mm less its view's learned offset (what the estimate averages), or None."""
         with self._lock:
             why = self._add(sample, nozzle_c, speed_mm_s)
             if why:
                 self.skipped[why] = self.skipped.get(why, 0) + 1
+                return None
+            s = self._samples[-1]
+            return s[3] - self._offsets.get(s[2], 0.0)
 
     def _add(self, sample, nozzle_c, speed_mm_s):
         px, confidence = _field(sample, "width_px"), _field(sample, "confidence")

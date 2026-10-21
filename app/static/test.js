@@ -24,6 +24,7 @@ const moveText = (op, from, to) => `${nameOf(op)} ${isNum(from) ? `${fmt(from, 0
 
 // ---- state ------------------------------------------------------------------------------------------------------------
 let rows = [], serverEvents = new Map(), derived = [], lastRowT = null, serverOffset = 0;
+let frames = [], frameKeys = new Set();  // every IR frame's outcome: {t_ms, mm, reason, group}
 let traceOkAt = 0, traceFailed = false, control = null, controlOkAt = 0, controlFailed = false;
 let estimate = null;  // {mm, sigma_mm, confidence, n, at}: `at` in browser time
 let windowMin = [5, 10, 15].includes(prefs.get("bench.window")) ? prefs.get("bench.window") : 10;
@@ -52,7 +53,7 @@ applyRail();
 
 // ---- IR thumbnail and frame rate (proof the camera feed is alive) -------------------------------------------------------
 const showIr = cameraView("#ir", "#ir-label", "#ir-empty", "IR");
-const frameTimes = [];
+const frameTimes = [], pageStart = Date.now();
 on("frame", f => {
   if (f.camera_kind !== "ir") return;
   showIr(f);
@@ -61,8 +62,9 @@ on("frame", f => {
 on("snapshot", m => { if (m.frames?.ir) showIr(m.frames.ir); });
 function renderVitals() {
   while (frameTimes.length && Date.now() - frameTimes[0] > 5000) frameTimes.shift();
-  const fps = frameTimes.length / 5;
-  led($("#st-ir"), fps > 0 ? `IR ${fps.toFixed(1)} fps` : "IR no frames", fps >= 1 ? "ok" : fps > 0 ? "warn" : "bad");
+  const span = Math.min(5, (Date.now() - pageStart) / 1000), fps = frameTimes.length / Math.max(span, 1);
+  if (!frameTimes.length && span < 5) led($("#st-ir"), "IR waiting", "off");
+  else led($("#st-ir"), fps > 0 ? `IR ${fps.toFixed(1)} fps` : "IR no frames", fps >= 1 ? "ok" : fps > 0 ? "warn" : "bad");
   const r = lastRow(), age = r ? (serverNow() - r.t_ms) / 1000 : null;
   led($("#st-loop"), !linkOk() ? "loop offline" : age === null ? "loop waiting" : `loop ${age < 1.5 ? "live" : `${age.toFixed(0)} s ago`}`,
     !linkOk() ? "bad" : age !== null && age < 3 ? "ok" : "warn");
@@ -96,8 +98,16 @@ const benchPlugin = {
     ctx.restore();
   },
   afterDatasetsDraw(chart, _, o) {
-    const { ctx, chartArea: a, scales: { x } } = chart;
+    const { ctx, chartArea: a, scales: { x, y } } = chart;
     ctx.save();
+    if (o.dots?.length) {  // one dot per measured frame: what the average line is made of
+      ctx.fillStyle = tint(C.accent, 55);
+      for (const d of o.dots) {
+        const px = x.getPixelForValue(d.t_ms), py = y.getPixelForValue(d.mm);
+        if (px < a.left || px > a.right || py < a.top || py > a.bottom) continue;
+        ctx.beginPath(); ctx.arc(px, py, 2.1, 0, 2 * Math.PI); ctx.fill();
+      }
+    }
     ctx.font = `600 10.5px ${tok("--mono")}`;
     const rowsRight = [-Infinity, -Infinity, -Infinity];
     for (const m of o.marks || []) {
@@ -223,7 +233,12 @@ function redraw() {
   const floorMm = control?.limits?.min_width_mm;
   walls.data = isNum(floorMm) ? [{ x: t0, y: floorMm }, { x: now, y: floorMm }] : [];
   // Keep the zone, the target and the walls line in view, and a little room around the width.
+  const dots = frames.filter(f => isNum(f.mm) && f.t_ms >= t0);
   const ys = [...width.data, ...zMin.data, ...zMax.data].map(p => p.y).filter(isNum);
+  if (dots.length > 4) {  // the dots' 5th-95th percentile: a stray frame must not squash the plot
+    const sorted = dots.map(d => d.mm).sort((p, q) => p - q);
+    ys.push(sorted[Math.floor(sorted.length * 0.05)], sorted[Math.floor(sorted.length * 0.95)]);
+  }
   if (isNum(floorMm)) ys.push(floorMm);
   const lo = ys.length ? Math.min(...ys) : 1.2, hi = ys.length ? Math.max(...ys) : 1.8;
   const pad = Math.max(0.05, (hi - lo) * 0.12);
@@ -243,6 +258,7 @@ function redraw() {
     Object.assign(ch.options.scales.x, { min: t0, max: now });
     ch.options.plugins.bench.lanes = lanes;
     ch.options.plugins.bench.marks = marks;
+    ch.options.plugins.bench.dots = ch === widthChart ? dots : null;
     ch.update("none");
   }
   $("#win-label").textContent = `last ${windowMin} min`;
@@ -256,6 +272,18 @@ document.querySelectorAll("[data-win]").forEach(b => (b.onclick = () => {
 
 // ---- trace: rows and events -----------------------------------------------------------------------------------------------
 const eventKey = e => `${e.t_ms}|${e.kind}|${JSON.stringify(e)}`;
+function addFrames(list) {
+  for (const f of list) {
+    const k = `${f.t_ms}|${f.group}`;
+    if (frameKeys.has(k)) continue;
+    frameKeys.add(k);
+    frames.push(f);
+  }
+  if (list.length > 1) frames.sort((p, q) => p.t_ms - q.t_ms);
+  const cut = serverNow() - KEEP_MS;
+  while (frames.length && frames[0].t_ms < cut) frameKeys.delete(`${frames[0].t_ms}|${frames.shift().group}`);
+}
+
 function ingest(newRows, newEvents) {
   for (const e of newEvents) serverEvents.set(eventKey(e), e);
   for (const r of newRows) {
@@ -332,6 +360,7 @@ async function pollTrace() {
     if (!res.ok || !Array.isArray(t.rows)) throw new Error(`HTTP ${res.status}`);
     serverOffset = isNum(t.server_ms) ? t.server_ms - Date.now() : 0;
     ingest(t.rows, t.events || []);
+    addFrames(t.samples || []);
     if (rows.length) lastRowT = lastRow().t_ms;
     traceOkAt = Date.now();
     traceFailed = false;
@@ -343,7 +372,29 @@ async function pollTrace() {
   renderAll();
 }
 
+// ---- frames: how many are measured, and why the rest are not --------------------------------------------------------------
+const REASON = { ok: "measured", turning: "turning", too_wide: "too wide", axis_out_of_frame: "out of view", ambiguous: "two beads",
+  low_contrast: "faint", no_edges: "no edges", not_extruding: "not extruding", no_motion: "no motion data",
+  not_converted: "no calibration", no_timestamp: "no timestamp", bad_image: "bad image", no_geometry: "no geometry" };
+function renderYield() {
+  const now = serverNow(), last = frames.filter(f => now - f.t_ms <= 60_000 && f.reason !== "not_extruding");
+  const el = $("#yield");
+  if (!last.length) { el.textContent = "no frames while extruding in the last minute"; el.title = ""; return; }
+  const counts = {};
+  for (const f of last) { const k = isNum(f.mm) ? "ok" : f.reason; counts[k] = (counts[k] || 0) + 1; }
+  const pct = k => Math.round(100 * (counts[k] || 0) / last.length);
+  const span = Math.max(1, (now - last[0].t_ms) / 1000);
+  const rest = Object.keys(counts).filter(k => k !== "ok").sort((p, q) => counts[q] - counts[p]);
+  el.replaceChildren(node("b", "", `${pct("ok")} % measured`),
+    node("span", "", ` · ${(last.length / span).toFixed(1)} frames/s · `),
+    node("span", "muted", rest.slice(0, 3).map(k => `${REASON[k] || k} ${pct(k)} %`).join(" · ")));
+  el.title = `Last minute, ${last.length} frames while extruding:\n` + Object.keys(counts).map(k => `${REASON[k] || k}: ${counts[k]}`).join("\n");
+}
+
 // ---- width now, zone meter --------------------------------------------------------------------------------------------
+// Live pushes; the 1 s poll only backfills what a dropped socket missed.
+on("sample", m => { addFrames([m]); renderYield(); renderDial(); });
+on("trace", m => { if (lastRowT !== null) { ingest([m], []); lastRowT = lastRow().t_ms; traceOkAt = Date.now(); renderAll(); } });
 on("width", m => {
   estimate = isNum(m.mm) ? { ...m, at: Date.now() - (isNum(m.age_ms) ? m.age_ms : 0) } : estimate;
 });
@@ -376,6 +427,7 @@ function renderDial() {
     led($("#w-led"), estimate ? "estimate stale" : "no estimate", "off");
     $("#w-delta").textContent = "";
     dial.dataset.zone = "none";
+    renderLastFrame();
     return;
   }
   const zone = zoneOf(e.mm), [state, text] = ZONE_TEXT[zone];
@@ -383,6 +435,11 @@ function renderDial() {
   led($("#w-led"), zone === "none" ? `conf ${fmt(e.confidence, 2)}` : text, state);
   $("#w-delta").textContent = controlOk() && isNum(control.target_mm) ? `${signed(e.mm - control.target_mm)} to target · conf ${fmt(e.confidence, 2)}` : "";
   dial.dataset.zone = zone;
+  renderLastFrame();
+}
+function renderLastFrame() {
+  const f = [...frames].reverse().find(x => isNum(x.mm)), age = f ? (serverNow() - f.t_ms) / 1000 : null;
+  $("#w-frame").textContent = f && age < 30 ? `last frame ${fmt(f.mm, 2)} mm · ${age.toFixed(1)} s ago` : "no measured frame in 30 s";
 }
 
 function renderMeter() {
@@ -644,6 +701,40 @@ const ago = t => {
   return s < 60 ? `${s} s ago` : `${Math.floor(s / 60)} min ${s % 60} s ago`;
 };
 
+// ---- the printer model's view: what one of Auto's steps on each lever would do now -------------------------------------------
+$("#model-rows").replaceChildren(...LEVERS.map(l => {
+  const li = node("li");
+  li.dataset.op = l.op;
+  li.append(node("span", "silk", l.name), node("span", "m-up", "—"), node("span", "m-down", "—"));
+  return li;
+}));
+function renderModel() {
+  const r = liveRow(), m = r?.model;
+  $("#model").dataset.empty = m ? "" : "1";
+  if (!m) {
+    $("#model-note").textContent = r ? "No prediction: the printer model or a readback is missing." : "";
+    return;
+  }
+  const chosen = r.action && !r.hold ? r.action.operation : null, dead = [];
+  for (const l of LEVERS) {
+    const li = $(`#model-rows li[data-op="${l.op}"]`), v = m.levers[l.op];
+    const cell = (d, sign) => (!v ? "—" : d === null ? "at its limit" : `${sign}${v.step} ${l.unit} → ${signed(d, 2)} mm`);
+    li.querySelector(".m-up").textContent = cell(v?.up ?? null, "+");
+    li.querySelector(".m-down").textContent = cell(v?.down ?? null, "−");
+    const most = v ? Math.max(Math.abs(v.up ?? 0), Math.abs(v.down ?? 0)) : 0;
+    li.dataset.dead = v && most < 0.01 ? "1" : "";
+    li.dataset.chosen = chosen === l.op ? "1" : "";
+    li.dataset.off = control?.levers?.[l.op]?.enabled === false ? "1" : "";
+    if (v && most < 0.01) dead.push(l.name.toLowerCase());
+  }
+  const gap = isNum(r.mm) ? r.mm - m.width_mm : null;
+  $("#model-note").textContent = [
+    `Model expects ${fmt(m.width_mm, 2)} mm at these settings${isNum(gap) ? `; measured ${signed(gap, 2)} from that` : ""}.`,
+    dead.includes("flow") ? "Flow barely moves the width here: the model thinks the hotend is at its melt limit, so more filament doesn't widen the bead." : "",
+    "Auto picks the step that best closes half the gap, weighing cost (flow 1, speed 3, nozzle 10).",
+  ].filter(Boolean).join(" ");
+}
+
 // ---- levers: readback, Auto's switch and step, and manual sends -------------------------------------------------------------
 $("#lever-rows").replaceChildren(...LEVERS.map(l => {
   const el = node("div", "lever");
@@ -797,6 +888,8 @@ function renderAll() {
   renderLoop();
   renderLevers();
   renderEvents();
+  renderModel();
+  renderYield();
 }
 
 setInterval(pollTrace, 1000);

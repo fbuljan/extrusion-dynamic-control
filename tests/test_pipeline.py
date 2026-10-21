@@ -989,6 +989,20 @@ def test_every_step_leaves_a_trace_row_and_manual_sends_are_events(sim):
     json.dumps(s.pipeline.trace(), allow_nan=False)
 
 
+def test_every_frame_is_a_sample_and_every_step_carries_the_models_view(sim):
+    s = sim(auto=True, target=1.35)
+    s.run(6)
+    trace = s.pipeline.trace()
+    assert len(trace["samples"]) == 6 and all(isinstance(x["mm"], float) and x["reason"] == "ok" for x in trace["samples"])
+    assert [m for m in s.emitted if m["type"] == "sample"][-1]["t_ms"] == trace["samples"][-1]["t_ms"]
+    model = trace["rows"][-1]["model"]
+    assert set(model["levers"]) == {"flow_percent", "speed_override_percent", "nozzle_temperature_c"}
+    flow, speed = model["levers"]["flow_percent"], model["levers"]["speed_override_percent"]
+    assert flow["up"] > 0 > flow["down"] and speed["up"] is None and speed["down"] > 0, "speed sits at its 100 % bound"
+    assert [m["t_ms"] for m in s.emitted if m["type"] == "trace"] == [r["t_ms"] for r in trace["rows"]]
+    json.dumps(trace, allow_nan=False)
+
+
 def test_the_trace_keeps_fifteen_minutes(sim):
     s = sim(auto=False)
     assert s.pipeline._trace.maxlen == 900
@@ -1284,8 +1298,8 @@ def test_threads_measure_frames_and_tick_until_stopped(tmp_path, monkeypatch):
     try:
         assert bridge.hooks == [p.on_message]
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and (p.stats["frames_done"] < 3 or len(emitted) < 8
-                                               or p.stats["foreign_results"] < 3):
+        while time.monotonic() < deadline and (p.stats["frames_done"] < 3 or p.stats["foreign_results"] < 3
+                                               or sum(m["type"] == "decision" for m in emitted) < 3):
             now = int(time.time() * 1000)
             bridge.deliver(TELEMETRY, telemetry(now), now)
             bridge.deliver(IR, ir_frame(now, int(now)), now)

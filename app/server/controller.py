@@ -146,6 +146,28 @@ class Controller:
                               "max_step": max(1, step) if _finite(step) else None}
         self._tuning = tuning
 
+    def sensitivity(self, setpoints, measured, context):
+        """What the printer model predicts one of Auto's steps on each lever does to the width now: {op: {"at",
+        "step", "up", "down"}} in mm, for display; None without a model, a readback or a finite prediction."""
+        if self.cfg["mode"] != "model" or self.model is None:
+            return None
+        current = {op: (setpoints or {}).get(op) for op in control_config.LEVERS}
+        if not all(_finite(v) for v in current.values()):
+            return None
+        measured, context = measured or {}, context or {}
+        try:
+            w0 = self._width(self._settings(current, measured), context)
+            out = {}
+            for op, spec in self.levers.items():
+                c, step, (lo, hi) = current[op], self.max_step(op), spec["bounds"]
+                up, down = min(hi, c + step), max(lo, c - step)
+                out[op] = {"at": c, "step": step,
+                           "up": self._width(self._settings(current, measured, op, up), context) - w0 if up > c else None,
+                           "down": self._width(self._settings(current, measured, op, down), context) - w0 if down < c else None}
+        except ModelFailure:
+            return None
+        return {"width_mm": w0, "levers": out}
+
     def lever_enabled(self, op):
         return self._tuning.get(op, {}).get("enabled", True)
 
