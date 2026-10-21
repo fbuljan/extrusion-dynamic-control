@@ -4,7 +4,8 @@ COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app/server ./server
 COPY app/static ./static
+COPY app/models ./models
 ARG APP_VERSION=dev
-ENV DATA_DIR=/cfg-data APP_VERSION=$APP_VERSION
+ENV DATA_DIR=/cfg-data MODELS_DIR=/app/models APP_VERSION=$APP_VERSION
 EXPOSE 8000
 CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"]

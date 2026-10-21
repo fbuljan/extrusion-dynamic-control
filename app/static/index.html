@@ -4,76 +4,116 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Extrusion Monitor</title>
-  <link rel="stylesheet" href="app.css?v=0.1.2">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="app.css?v=0.2.0">
 </head>
-<body>
-<header>
-  <h1>DEMEX <span>Extrusion Monitor</span></h1>
-  <span id="version" class="muted mono"></span>
-  <span id="st-reader" class="pill">reader: …</span>
-  <span id="st-writer" class="pill">writer: …</span>
-  <span id="st-gateway" class="pill">gateway: …</span>
-  <span class="spacer"></span>
-  <span id="program" class="muted mono"></span>
-  <button onclick="window.open('monitor.html', 'monitor', 'width=1500,height=950')">Topics &amp; graphs ↗</button>
-  <button id="open-settings">Settings</button>
+<body class="console-page">
+<header class="topbar">
+  <div class="brand"><span class="silk">DEMEX</span> Extrusion Monitor <span id="version" class="ver"></span></div>
+  <div class="leds">
+    <span id="st-reader" class="led" data-state="off">reader</span>
+    <span id="st-writer" class="led" data-state="off">writer</span>
+    <span id="st-model" class="led" data-state="off">models</span>
+    <span id="st-gateway" class="led" data-state="off">gateway</span>
+  </div>
+  <span id="program" class="program" title="Active print program"></span>
+  <button class="btn" onclick="window.open('monitor.html', 'monitor', 'width=1500,height=950')">Graphs &amp; topics ↗</button>
+  <button class="btn" id="open-settings">Settings</button>
 </header>
 
-<div class="main-grid">
-  <div class="camera">
-    <img id="ir" class="main" alt="IR camera">
-    <span id="ir-label" class="label">IR · waiting</span>
-    <span id="ir-empty" class="empty">waiting for IR frames…</span>
-    <div class="inset">
-      <img id="rgb" alt="RGB camera">
-      <span id="rgb-label" class="label">RGB</span>
-      <span id="rgb-empty" class="empty" style="font-size:11px">no RGB</span>
-    </div>
+<section class="bridge bridge-ctl" id="bridge-ctl" aria-label="Bead width and target">
+  <div class="readout" id="r-width">
+    <span class="silk">Width</span><span class="value">—</span>
+    <span class="sub"><span id="conf-led" class="led" data-state="off" hidden></span><span id="width-note">no estimate</span></span>
   </div>
+  <div class="readout" id="r-target">
+    <span class="silk">Target</span>
+    <span class="value target-row">
+      <input id="target" type="number" step="0.01" inputmode="decimal" aria-label="Target width in millimetres, empty for none">
+      <small>mm</small>
+      <button class="btn" id="hold" type="button" aria-label="Hold current width as target" title="Target := current width">Hold</button>
+    </span>
+    <span class="sub" id="target-sub" role="status"></span>
+  </div>
+  <div class="readout" id="r-delta">
+    <span class="silk">Δ to target</span><span class="value">—</span><span class="sub"></span>
+  </div>
+</section>
 
-  <div class="side">
-    <section class="panel">
-      <h2>Process</h2>
-      <div class="metrics">
-        <div class="metric"><div class="k">Nozzle (current / target)</div><div class="v" id="m-nozzle">—</div></div>
-        <div class="metric"><div class="k">Bed (current / target)</div><div class="v" id="m-bed">—</div></div>
-        <div class="metric"><div class="k">Melt (IR)</div><div class="v" id="m-melt">—</div></div>
-        <div class="metric"><div class="k">Previous layer (IR)</div><div class="v" id="m-substrate">—</div></div>
-        <div class="metric"><div class="k">Extrusion multiplier</div><div class="v" id="m-flow">—</div></div>
-        <div class="metric"><div class="k">Speed override</div><div class="v" id="m-override">—</div></div>
-        <div class="metric"><div class="k">Velocity</div><div class="v" id="m-vel">—</div></div>
-        <div class="metric"><div class="k">Extrusion speed (reported, no unit)</div><div class="v" id="m-espeed">—</div></div>
-        <div class="metric"><div class="k">Position Z</div><div class="v" id="m-z">—</div></div>
-        <div class="metric"><div class="k">Cooling / fan</div><div class="v" id="m-cool">—</div></div>
+<section class="bridge" id="bridge" aria-label="Live process readouts"></section>
+
+<main class="console" id="console">
+  <section class="stage-wrap">
+    <div class="stage-bar">
+      <div class="seg" role="group" aria-label="Camera layout">
+        <button data-layout="pip" title="Picture in picture (1)">PiP</button>
+        <button data-layout="split" title="Side by side (2)">Split</button>
+        <button data-layout="single" title="One camera (3)">Single</button>
       </div>
-    </section>
+      <button class="btn" id="swap" title="Swap cameras (S)">⇄ Swap</button>
+    </div>
+    <div class="stage" id="stage" data-layout="pip" data-main="ir">
+      <figure class="cam" id="cam-ir" data-kind="ir">
+        <img id="ir" alt="Thermal camera, raw">
+        <figcaption id="ir-label" class="tally" data-state="none">IR · waiting</figcaption>
+        <span id="ir-empty" class="empty">Waiting for IR frames. The trailing camera publishes about one per second.</span>
+        <span class="pip-grip" title="Drag to resize"></span>
+      </figure>
+      <div class="cam-divider" id="cam-divider" role="separator" aria-orientation="vertical" tabindex="0"
+           aria-label="Resize cameras"></div>
+      <figure class="cam" id="cam-rgb" data-kind="rgb">
+        <img id="rgb" alt="RGB camera">
+        <figcaption id="rgb-label" class="tally" data-state="none">RGB · waiting</figcaption>
+        <span id="rgb-empty" class="empty">Waiting for RGB frames.</span>
+        <span class="pip-grip" title="Drag to resize"></span>
+      </figure>
+    </div>
+  </section>
 
-    <section class="panel">
-      <h2>Controls</h2>
-      <div id="controls"></div>
-      <p class="note">One accepted request per second, shared by every operation and every sender. Commands work only while
-        the operator has native DEMEX in RUN; speed override needs Motion PI and fans need Cooling PI disabled there first.
-        "accepted" is not confirmation; wait for the result in the command log.</p>
-      <details>
-        <summary>Raw request (sent as-is, no checks; JSON to <span class="mono" id="req-topic"></span>)</summary>
-        <textarea id="raw"></textarea>
-        <div class="row" style="margin-top:6px"><button id="raw-template">New template</button><button id="raw-send">Send raw</button>
-          <span class="muted">A template expires ~1.5 s after the status it was built from.</span></div>
+  <div class="splitter" id="rack-splitter" role="separator" aria-orientation="vertical" tabindex="0"
+       aria-label="Resize control rack"></div>
+
+  <aside class="rack">
+    <section class="ctl" id="ctl" aria-label="Width controller" data-link="offline">
+      <div class="rack-head">
+        <span class="silk">Controller</span>
+        <span id="send-led" class="led" data-state="off">sends ?</span>
+      </div>
+      <div class="ctl-main">
+        <button class="arm" id="auto" type="button" role="switch" aria-checked="false" aria-label="Auto control" disabled>
+          <span class="silk">Auto</span></button>
+        <span id="auto-led" class="led" data-state="off">—</span>
+      </div>
+      <div class="decision" id="decision"></div>
+      <details class="why" id="why" hidden>
+        <summary>Why</summary>
+        <div id="why-body"></div>
       </details>
-      <div id="send-msg" class="muted mono" style="margin-top:8px"></div>
+      <div id="ctl-msg" class="send-msg" role="status"></div>
+      <div id="ctl-warn" class="send-msg" role="status"></div>
     </section>
-
-    <section class="panel">
-      <h2>Command log</h2>
-      <div id="writer-status" class="muted mono" style="font-size:11px;margin-bottom:6px"></div>
-      <ul class="log" id="log"></ul>
-    </section>
-  </div>
-</div>
+    <div class="rack-head">
+      <span class="silk">Corrections</span>
+      <span id="write-led" class="led" data-state="off">write</span>
+    </div>
+    <div class="strips" id="strips"></div>
+    <div id="send-msg" class="send-msg" role="status"></div>
+    <details class="raw">
+      <summary>Raw request <span class="muted">sent as-is, no checks</span></summary>
+      <div class="muted mono raw-topic" id="req-topic"></div>
+      <textarea id="raw" spellcheck="false"></textarea>
+      <div class="raw-actions">
+        <button class="btn" id="raw-template" title="Built from the latest gate status; it expires about 1.5 s later">New template</button>
+        <button class="btn" id="raw-send">Send raw</button></div>
+    </details>
+    <div class="log-head"><span class="silk">Log</span><span id="writer-status" class="muted mono"></span></div>
+    <ul class="log" id="log"></ul>
+  </aside>
+</main>
 
 <dialog id="settings">
   <form>
-    <h3 style="margin-top:0">Broker settings</h3>
+    <h3>Broker settings</h3>
     <label>Host <input name="host"></label>
     <label>Port <input name="port" type="number"></label>
     <label>Reader user <input name="reader_user"></label>
@@ -81,12 +121,12 @@
     <label>Writer user <input name="writer_user"></label>
     <label>Writer password <input name="writer_password" type="password" autocomplete="off"></label>
     <label>Controller ID (from LEAM's command guide) <input name="controller_id"></label>
-    <div class="actions"><button type="button" id="close-settings">Cancel</button>
-      <button class="primary" type="submit">Save &amp; reconnect</button></div>
+    <div class="actions"><button class="btn" type="button" id="close-settings">Cancel</button>
+      <button class="btn primary" type="submit">Save &amp; reconnect</button></div>
   </form>
 </dialog>
 
-<script src="common.js?v=0.1.2"></script>
-<script src="main.js?v=0.1.2"></script>
+<script src="common.js?v=0.2.0"></script>
+<script src="main.js?v=0.2.0"></script>
 </body>
 </html>

@@ -4,26 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Topics &amp; Graphs</title>
-  <link rel="stylesheet" href="app.css?v=0.1.2">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="app.css?v=0.2.0">
 </head>
 <body>
-<header>
-  <h1>DEMEX <span>Topics &amp; Graphs</span></h1>
-  <span id="version" class="muted mono"></span>
-  <span id="st-reader" class="pill">reader: …</span>
-  <span class="spacer"></span>
-  <span id="topic-count" class="muted mono"></span>
-  <a href="./">← main view</a>
+<header class="topbar">
+  <div class="brand"><span class="silk">DEMEX</span> Graphs &amp; topics <span id="version" class="ver"></span></div>
+  <div class="leds"><span id="st-reader" class="led" data-state="off">reader</span></div>
+  <span id="topic-count" class="program"></span>
+  <a class="btn" href="./">← Console</a>
 </header>
 
 <div class="monitor-grid">
-  <div class="camera" style="aspect-ratio: 4 / 3">
-    <img id="ir" class="main" alt="IR camera">
-    <span id="ir-label" class="label">IR · waiting</span>
-    <span id="ir-empty" class="empty">waiting for IR frames…</span>
-  </div>
+  <figure class="cam solo" data-kind="ir">
+    <img id="ir" alt="Thermal camera, raw">
+    <figcaption id="ir-label" class="tally" data-state="none">IR · waiting</figcaption>
+    <span id="ir-empty" class="empty">Waiting for IR frames.</span>
+  </figure>
 
   <div class="charts">
+    <div class="panel wide"><h2>Width vs target mm</h2><div class="chart"><canvas id="c-width"></canvas></div></div>
     <div class="panel"><h2>Temperatures °C</h2><div class="chart"><canvas id="c-temp"></canvas></div></div>
     <div class="panel"><h2>Extrusion multiplier %</h2><div class="chart"><canvas id="c-flow"></canvas></div></div>
     <div class="panel"><h2>Velocity mm/s</h2><div class="chart"><canvas id="c-motion"></canvas></div></div>
@@ -45,7 +45,7 @@
 </div>
 
 <script src="vendor/chart.umd.min.js"></script>
-<script src="common.js?v=0.1.2"></script>
-<script src="monitor.js?v=0.1.2"></script>
+<script src="common.js?v=0.2.0"></script>
+<script src="monitor.js?v=0.2.0"></script>
 </body>
 </html>

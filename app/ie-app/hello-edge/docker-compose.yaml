@@ -16,6 +16,10 @@ services:
       MQTT_USER: ${MQTT_USER}
       MQTT_WRITER_USER: ${MQTT_WRITER_USER}
       MQTT_CONTROLLER_ID: ${MQTT_CONTROLLER_ID}
+      # Slicing of the part being printed, for the width controller's layer count and printer model.
+      FIRST_LAYER_MM: ${FIRST_LAYER_MM:-0.7}
+      LAYER_MM: ${LAYER_MM:-0.5}
+      LINE_WIDTH_MM: ${LINE_WIDTH_MM:-1.5}
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}

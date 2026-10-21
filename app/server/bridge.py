@@ -1,5 +1,6 @@
 """MQTT side of the dashboard: reads every printer topic, tracks per-topic stats, sends extrusion requests."""
 import json
+import logging
 import os
 import threading
 import time
@@ -12,7 +13,8 @@ import paho.mqtt.client as mqtt
 READ_TOPIC = "demex/demo/mini/#"
 REQUEST_TOPIC = "demex/hackathon/mini/extrusion/request"
 WRITER_TOPICS = ["demex/hackathon/mini/extrusion/result", "demex/hackathon/mini/extrusion/status"]
-MIN_REQUEST_INTERVAL_S = 1.0  # organiser limit: one accepted request per second, shared by all operations and senders
+# LEAM accepts one request per second across all senders; ours (manual and Auto alike) keep 2 s of headroom.
+MIN_REQUEST_INTERVAL_S = 2.0
 HISTORY_POINTS = 600
 STALE_SOURCE_MS = 3000
 SETTING_KEYS = ["host", "port", "reader_user", "reader_password", "writer_user", "writer_password", "controller_id"]
@@ -25,6 +27,7 @@ OPERATIONS = {
     "fan_speed_percent": (0, 100),
 }
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent.parent / ".data"))
+log = logging.getLogger(__name__)
 
 
 def now_ms():
@@ -58,11 +61,13 @@ def source(s, name):
     return (src.get("payload") or {}) if src.get("valid") is True else {}
 
 
-def heater(duet, name, recv_ms):
-    # Heater readings refresh only every ~1.4 s and stay valid=true while aging, so also drop old ones.
+def heater(duet, name, published_ms):
+    # Heater readings refresh only every ~1.4 s and stay valid=true while aging, so also drop old ones. Age is judged
+    # against the message's own publish time (LEAM's clock), so a skewed clock on our side blanks nothing.
     h = dig(duet, "temperatures", name) or {}
     ts = h.get("source_utc_ns")
-    if h.get("valid") is not True or not isinstance(ts, (int, float)) or recv_ms - ts / 1e6 > STALE_SOURCE_MS:
+    if h.get("valid") is not True or not isinstance(ts, (int, float)) or not isinstance(published_ms, (int, float)) \
+            or published_ms - ts / 1e6 > STALE_SOURCE_MS:
         return None
     return {"current": h.get("current_c"), "target": h.get("active_target_c"), "state": h.get("state")}
 
@@ -75,10 +80,11 @@ def telemetry_metrics(msg, recv_ms):
     cooling = dig(process, "pid_state", "cooling") or {}
     melt_valid = melt.get("valid") is True and dig(melt, "payload", "valid") is True
     fan = lambda i: (v * 100 if isinstance(v := dig(duet, "fans", i, "actualValue"), (int, float)) else None)
+    published = msg.get("published_utc_ms")
     return {
         "type": "telemetry", "t": recv_ms,
-        "nozzle": heater(duet, "nozzle", recv_ms),
-        "bed": heater(duet, "bed", recv_ms),
+        "nozzle": heater(duet, "nozzle", published),
+        "bed": heater(duet, "bed", published),
         "melt": dig(melt, "payload", "temperature_c") if melt_valid else None,
         "melt_reason": dig(melt, "payload", "reason"),
         "substrate": substrate.get("temperature_c") if substrate.get("valid") else None,
@@ -103,6 +109,9 @@ class Bridge:
     def __init__(self):
         self.lock = threading.Lock()
         self.listeners = []  # callables fed from the MQTT thread
+        self.hooks = []  # hook(topic, payload, recv_ms) for every parsed message, from the MQTT thread
+        self.errors_seen = {}  # what failed -> last error text: something failing on every message logs once
+        self.send_lock = threading.Lock()  # the control loop and manual sends share one rate limit and sequence
         self.settings = self._load_settings()
         self.reader = self.writer = None
         self.status = {"reader": "disconnected", "writer": "not configured"}
@@ -192,22 +201,34 @@ class Bridge:
 
     # incoming -------------------------------------------------------------
     def _on_message(self, client, userdata, msg):
-        if msg.retain:
-            return
-        t = now_ms()
+        # Nothing may escape: paho re-raises callback exceptions, and that stops its network thread for good.
         try:
-            payload = json.loads(msg.payload)
-        except ValueError:
-            payload = msg.payload[:200].decode(errors="replace")
+            if msg.retain:
+                return
+            topic, t = msg.topic, now_ms()
+            try:
+                payload = json.loads(msg.payload)
+            except ValueError:
+                payload = msg.payload[:200].decode(errors="replace")
+        except Exception as e:  # noqa: BLE001 - e.g. RecursionError on absurd nesting, a topic that isn't UTF-8
+            self._log_once(("message",), e, "unreadable MQTT message")
+            return
+        try:
+            self._handle(topic, payload, t, len(msg.payload))
+        except Exception as e:  # noqa: BLE001 - a malformed message is skipped, the next one still counts
+            self._log_once(("message", topic), e, f"handling a message on {topic} failed")
+        self._run_hooks(topic, payload, t)
+
+    def _handle(self, topic, payload, t, size):
         with self.lock:
-            st = self.topics.setdefault(msg.topic, {"count": 0, "recent": deque(maxlen=600), "last_ms": 0, "last": None})
+            st = self.topics.setdefault(topic, {"count": 0, "recent": deque(maxlen=600), "last_ms": 0, "last": None})
             st["count"] += 1
             st["recent"].append(t)
             st["last_ms"] = t
-            st["bytes"] = len(msg.payload)
+            st["bytes"] = size
             st["last"] = payload
 
-        if msg.topic.endswith("/telemetry") and isinstance(payload, dict):
+        if topic.endswith("/telemetry") and isinstance(payload, dict):
             metrics = telemetry_metrics(payload, t)
             if t - self.last_history_ms >= 500:
                 self.history.append(metrics)
@@ -215,22 +236,37 @@ class Bridge:
             if t - self.last_telemetry_emit_ms >= 200:
                 self.last_telemetry_emit_ms = t
                 self._emit(metrics)
-        elif "/preview/" in msg.topic and isinstance(payload, dict) and payload.get("jpeg_base64"):
+        elif "/preview/" in topic and isinstance(payload, dict) and payload.get("jpeg_base64"):
             frame = {"type": "frame", "recv_ms": t, **{k: payload.get(k) for k in (
                 "camera_kind", "camera_index", "role", "jpeg_base64", "published_utc_ms", "expires_utc_ms",
                 "source_age_ms", "sequence", "session_id", "selection_revision")}}
             self.frames[payload.get("camera_kind")] = frame
             self._emit(frame)
-        elif msg.topic.endswith("/extrusion/status"):
+        elif topic.endswith("/extrusion/status"):
             self.writer_status = payload
             self.status_rx = (payload, time.monotonic())
             self._emit({"type": "writer_status", "t": t, "payload": payload})
-        elif msg.topic.endswith("/extrusion/result"):
+        elif topic.endswith("/extrusion/result"):
             # Every sender shares this topic; mark which results answer our own requests.
             ours = isinstance(payload, dict) and payload.get("request_id") in self.sent_ids
             entry = {"t": t, "kind": "result", "payload": payload, "ours": ours}
             self.writer_log.appendleft(entry)
             self._emit({"type": "writer_log", **entry})
+
+    def _run_hooks(self, topic, payload, recv_ms):
+        for hook in list(self.hooks):
+            try:
+                hook(topic, payload, recv_ms)
+            except Exception as e:  # noqa: BLE001 - one broken consumer must not starve the others
+                self._log_once(("hook", hook), e, f"message hook {hook!r} failed on {topic}")
+
+    def _log_once(self, key, error, what):
+        text = f"{type(error).__name__}: {error}"
+        if self.errors_seen.get(key) != text:
+            if len(self.errors_seen) > 100:
+                self.errors_seen.clear()
+            self.errors_seen[key] = text
+            log.error("%s", what, exc_info=error)
 
     def topics_summary(self):
         t = now_ms()
@@ -282,17 +318,21 @@ class Bridge:
 
     def send_request(self, request):
         what = request.get("correction") if isinstance(request, dict) and request.get("correction") else "raw"
-        if not self.writer or self.status.get("writer") != "connected":
-            return self.log_refused(what, f"writer not connected ({self.status.get('writer')})")
-        wait = MIN_REQUEST_INTERVAL_S - (time.time() - self.last_request_s)
-        if wait > 0:
-            return self.log_refused(what, f"rate limit: wait {wait:.1f}s")
-        self.last_request_s = time.time()
-        info = self.writer.publish(REQUEST_TOPIC, json.dumps(request), qos=0)
-        if isinstance(request, dict):
-            if isinstance(request.get("sequence"), int):
-                self.last_sequence = max(self.last_sequence, request["sequence"])
-            self.sent_ids.append(request.get("request_id"))
+        sequence = request.get("sequence") if isinstance(request, dict) else None
+        with self.send_lock:
+            if not self.writer or self.status.get("writer") != "connected":
+                return self.log_refused(what, f"writer not connected ({self.status.get('writer')})")
+            wait = MIN_REQUEST_INTERVAL_S - (time.time() - self.last_request_s)
+            if wait > 0:
+                return self.log_refused(what, f"rate limit: wait {wait:.1f}s")
+            if isinstance(sequence, int) and sequence <= self.last_sequence:
+                return self.log_refused(what, f"sequence {sequence} already used; build a new request")
+            self.last_request_s = time.time()
+            info = self.writer.publish(REQUEST_TOPIC, json.dumps(request), qos=0)
+            if isinstance(request, dict):
+                if isinstance(sequence, int):
+                    self.last_sequence = sequence
+                self.sent_ids.append(request.get("request_id"))
         entry = {"t": now_ms(), "kind": "request", "payload": request, "published": info.rc == mqtt.MQTT_ERR_SUCCESS}
         self.writer_log.appendleft(entry)
         self._emit({"type": "writer_log", **entry})
@@ -301,7 +341,10 @@ class Bridge:
     # fan-out to websockets --------------------------------------------------
     def _emit(self, message):
         for listener in list(self.listeners):
-            listener(message)
+            try:
+                listener(message)
+            except Exception as e:  # noqa: BLE001 - a dead dashboard socket must not break a send or the MQTT thread
+                self._log_once(("listener", id(listener)), e, "a dashboard listener failed")
 
     def snapshot(self):
         t = now_ms()
