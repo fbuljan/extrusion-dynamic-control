@@ -22,6 +22,9 @@ last estimate below the floor while under `min_width_mm` + `floor_release_mm`. S
 The operator's allowed band (`band`: mm below and above the target, default `deadband_mm` each side) is where Auto holds;
 outside it, it steers towards the target. The noise band stays a hold too, so a band tighter than the noise can't make it
 chase noise. `tune` switches levers off for Auto or makes their steps smaller, never larger.
+A move is one lever or two (`pair_moves`): only moves that promise `min_effect_fraction` of the asked change count, and
+the cheapest of those wins, with a cost for pushing a lever towards its bound. A pair goes out as two commands, the
+slower lever first; the second follows once the first is confirmed (`then` names it), and the pair settles once.
 """
 import math
 import statistics
@@ -85,6 +88,7 @@ class Decision:
     candidates: list = field(default_factory=list)
     hold: bool = True
     floor: bool = False  # acted under the floor rules (estimate below min_width_mm): steps up to floor_step_factor x
+    then: dict | None = None  # a pair's second command, sent by a later step once this one is confirmed
 
     def to_dict(self):
         return asdict(self)
@@ -103,6 +107,7 @@ class Controller:
         self._own = {}  # op -> our value the readback last confirmed
         self._advice = []  # [(op, value, t_ms, predicted, before)] recent advice-mode proposals
         self._cmd = None  # the one command in flight
+        self._next = None  # a pair's second command, waiting for the first to be confirmed
         self._proposal = None
         self._pins = {}
         self._foreign_until, self._foreign_reason = -math.inf, ""
@@ -198,9 +203,15 @@ class Controller:
         p = self._proposal if self._proposal and self._proposal["action"] == {"operation": operation, "value": value} \
             else {}
         current = self._rb.get(operation)
+        n, sent = self._next, {"operation": operation, "value": value}
+        if n and n["after"] == sent:
+            n["sent_ms"] = now_ms
+        elif n:
+            self._next = None
         self._cmd = {"op": operation, "value": value, "id": request_id, "sent_ms": now_ms, "state": "sent",
                      "from": current[0] if current else None, "result": None, "result_ms": None,
-                     "predicted": p.get("predicted"), "before": p.get("before"), "cutoff": None, "why": None}
+                     "predicted": p.get("predicted"), "before": p.get("before"), "cutoff": None, "why": None,
+                     "ops": p.get("ops"), "not_before": p.get("not_before")}
         self._uncertain.setdefault(operation, []).append(
             (value, now_ms, now_ms + self.cfg["uncertain_memory_s"] * 1000, p.get("predicted"), p.get("before")))
         self._last_action_ms = now_ms
@@ -214,6 +225,7 @@ class Controller:
         p = self._proposal if self._proposal and self._proposal["action"] == {"operation": operation, "value": value} \
             else {}
         self._advice.append((operation, value, now_ms, p.get("predicted"), p.get("before")))
+        self._next = None
 
     def note_result(self, request_id, state, now_ms):
         c = self._cmd
@@ -275,6 +287,8 @@ class Controller:
         self._uncertain.pop(op, None)
         if self._cmd and self._cmd["op"] == op:
             self._cmd = None
+        if self._next and op in self._next["ops"]:
+            self._next = None
 
     def _fail(self, c, why, now_ms):
         c["state"], c["why"], c["failed_ms"] = "failed", why, now_ms
@@ -289,7 +303,7 @@ class Controller:
         c["state"] = "confirmed"
         # A command that landed after it was given up on took effect now, not at the old result time.
         start = c["result_ms"] if c["result_ms"] is not None and not late else now_ms
-        c["cutoff"] = start + self._delay_ms(c["op"])
+        c["cutoff"] = max(start + self._delay_ms(c["op"]), c.get("not_before") or -math.inf)
         self._gate_after(c["cutoff"])
         self._own[c["op"]] = c["value"]
         self._uncertain[c["op"]] = [e for e in self._uncertain.get(c["op"], []) if e[1] > c["sent_ms"]]
@@ -348,6 +362,7 @@ class Controller:
                 or self._needs_views(estimate):
             return
         self._cmd = None
+        self._next = None  # a pair's first half settled alone: the width it planned from is gone
         if not (c["predicted"] and c["before"]):
             self._streak = None
             return
@@ -363,8 +378,8 @@ class Controller:
         # the noise of a difference of two estimates does not grow with the number of steps, the predicted sum does.
         # A later step's estimate replaces it when further back: a step taken while the rolling estimate still lagged
         # a disturbance would otherwise make the lever look ineffective.
-        direction, s = (1 if c["predicted"] > 0 else -1), self._streak
-        if s and s["op"] == c["op"] and s["dir"] == direction and \
+        direction, s, ops = (1 if c["predicted"] > 0 else -1), self._streak, tuple(c.get("ops") or (c["op"],))
+        if s and s["op"] == ops and s["dir"] == direction and \
                 c["sent_ms"] - s["sent_ms"] <= cfg["streak_gap_s"] * 1000:
             s["predicted"] += c["predicted"]
             s["steps"] += 1
@@ -372,14 +387,16 @@ class Controller:
             if (c["before"][0] - s["before"][0]) * direction < 0:
                 s["before"] = c["before"]
         else:
-            s = self._streak = {"op": c["op"], "dir": direction, "predicted": c["predicted"], "steps": 1,
+            s = self._streak = {"op": ops, "dir": direction, "predicted": c["predicted"], "steps": 1,
                                 "before": c["before"], "sent_ms": c["sent_ms"]}
         observed = (estimate["mm"] - s["before"][0]) * direction
         sigma = math.hypot(s["before"][1], estimate["sigma_mm"])
         if s["steps"] >= cfg["ineffective_steps"] and \
                 observed + cfg["ineffective_z"] * sigma < cfg["ineffective_ratio"] * abs(s["predicted"]):
-            self._disabled[c["op"]] = (f"alarm: {_name(c['op'])} moved the width less than "
-                                       f"{cfg['ineffective_ratio']:.0%} of the predicted change")
+            why = (f"alarm: {' + '.join(_name(op) for op in ops)} moved the width less than "
+                   f"{cfg['ineffective_ratio']:.0%} of the predicted change")
+            for op in ops:
+                self._disabled[op] = why
 
     def _needs_views(self, estimate):
         """The print shows several views (each with its own camera offset) but this estimate holds only one."""
@@ -392,6 +409,7 @@ class Controller:
         self._refused.clear()
         self._saturated = False  # a pending judgement stays: the step it judges was taken all the same
         self._unreachable_steps = 0
+        self._next = None
         self._gate_after(now_ms, change=False)
 
     # decision -------------------------------------------------------------------------------------------------------
@@ -442,6 +460,7 @@ class Controller:
             self._refused.clear()
             self._target = target_mm
             self._floor_until = -math.inf
+            self._next = None
         self._settle(now_ms, estimate)
         error = target_mm - estimate["mm"] if target_mm is not None and estimate is not None else None
         # Below the floor (beads laid since the last change), or just back above it (noise), while still narrower than
@@ -475,6 +494,10 @@ class Controller:
         layer = context.get("layer")
         if layer is None or layer < cfg["min_layer"]:
             return hold(f"first layers ({layer if layer is not None else '?'} of {cfg['min_layer']})")
+        if self._next and now_ms >= self._foreign_until:  # decided already: needs no fresh estimate
+            follow = self._follow_up(now_ms, current, auto, gate_open, error, hold)
+            if follow:
+                return follow
         gap = None
         if estimate is None:
             gap = "no width estimate"
@@ -563,36 +586,89 @@ class Controller:
             self._unreachable_steps = 0
         elif self._unreachable_steps >= 1:
             return hold(f"alarm: {out_of_reach}", candidates)
-        # A smaller step promises less by design: whether a tuned lever does anything is judged on its configured step.
-        tuned = best is not None and self.max_step(best["operation"]) < self.levers[best["operation"]]["max_step"]
-        promise = best["full_step_change_mm"] if tuned else best["predicted_change_mm"] if best else 0.0
-        if best is None or promise * direction < cfg["min_effect_fraction"] * cfg["kappa"] * abs(error):
+        bar = cfg["min_effect_fraction"] * cfg["kappa"] * abs(error)
+        if best is None or best["promise_mm"] * direction < bar:
             disabled = [r for op, r in self._disabled.items() if op in self.levers]
-            why = "alarm: no usable lever can move the width"
+            why = f"alarm: no usable lever can move the width ({self._blocked(now_ms, current, candidates, bar)})"
             if disabled:
                 why = f"{disabled[0]}; no usable lever can move the width{RE_ARM if auto else RE_ARM_ADVISE}"
             return hold(why, candidates)
-        action = {"operation": best["operation"], "value": best["value"]}
-        if not self._within_limits(action, current):
-            return hold(f"alarm: internal limit check refused {action}", candidates)
+        action, then = {"operation": best["operation"], "value": best["value"]}, best.get("then")
+        if not self._within_limits(action, current) or then and not self._within_limits(then, current):
+            return hold(f"alarm: internal limit check refused {action}{f' + {then}' if then else ''}", candidates)
         predicted = estimate["mm"] + best["predicted_change_mm"]
         what = f"{_fmt(best['operation'], best['from'])} -> {best['value']:g}"
+        if then:
+            what += f" + {_fmt(then['operation'], current[then['operation']])} -> {then['value']:g}"
         if not reachable:
             what = f"{out_of_reach}; one step: {what}"
         if auto and not gate_open:
             return hold(f"gate closed (would set {what})", candidates, predicted)
         before = (estimate["mm"], estimate["sigma_mm"], at_ceiling, ceiling,
                   self._level(now_ms - LEVEL_S * 1000) if error > 0 and ceiling is not None else None)
-        self._proposal = {"action": action, "predicted": best["predicted_change_mm"], "before": before,
-                          "unreachable": not reachable}
+        first = best.get("first_change_mm", best["predicted_change_mm"])  # what the first command does alone
+        self._proposal = {"action": action, "predicted": first, "before": before, "unreachable": not reachable}
+        self._next = None
         if auto:
             self._last_action_ms = now_ms
+            if then:
+                self._next = {"action": then, "after": action, "ops": (action["operation"], then["operation"]),
+                              "predicted": best["predicted_change_mm"], "before": before, "error": error,
+                              "floor": self._floor, "what": what, "created_ms": now_ms}
         else:
-            self._advice.append((action["operation"], action["value"], now_ms, best["predicted_change_mm"], before))
+            self._advice.append((action["operation"], action["value"], now_ms, first, before))
+            if then:
+                self._advice.append((then["operation"], then["value"], now_ms, None, None))
         reason = what if auto or gate_open else f"{what} (gate closed)"
         if self._floor:
             reason = f"floor rules: {reason}"
-        return Decision(now_ms, mode, action, reason, error, predicted, candidates, False, self._floor)
+        return Decision(now_ms, mode, action, reason, error, predicted, candidates, False, self._floor,
+                        dict(then) if then else None)
+
+    def _follow_up(self, now_ms, current, auto, gate_open, error, hold):
+        """A pair's second command once its first is confirmed: a Decision, or None (nothing to send, or dropped)."""
+        n, c, cfg = self._next, self._cmd, self.cfg
+        mine = c is not None and {"operation": c["op"], "value": c["value"]} == n["after"]
+        if not auto or "sent_ms" not in n or not mine or c["state"] == "failed":
+            if not mine or not auto or c["state"] == "failed" or now_ms - n["created_ms"] > cfg["result_timeout_ms"]:
+                self._next = None
+            return None
+        if c["state"] != "confirmed":
+            return None  # waiting for the first half's readback: the usual hold says so
+        op, value = n["action"]["operation"], n["action"]["value"]
+        if self._excluded(op, now_ms) or (op, value) in self._refused or not self._within_limits(n["action"], current) \
+                or error is not None and error * n["error"] <= 0 or now_ms - c["cutoff"] > LEVEL_S * 1000:
+            self._next = None
+            return None
+        what = f"{_fmt(op, current[op])} -> {value:g}, second half of {n['what']}"
+        if self._last_action_ms is not None and now_ms - self._last_action_ms < cfg["min_spacing_ms"]:
+            return hold(f"spacing before {what}")
+        if not gate_open:
+            return hold(f"gate closed (would set {what})")
+        self._proposal = {"action": dict(n["action"]), "predicted": n["predicted"], "before": n["before"],
+                          "unreachable": False, "ops": n["ops"], "not_before": c["cutoff"]}
+        self._last_action_ms = now_ms
+        reason = f"floor rules: {what}" if n["floor"] else what
+        half = {"operation": op, "value": value, "from": current[op], "predicted_change_mm": n["predicted"]}
+        return Decision(now_ms, "auto", dict(n["action"]), reason, n["error"] if error is None else error,
+                        n["before"][0] + n["predicted"], [half], False, n["floor"])
+
+    def _blocked(self, now_ms, current, candidates, bar):
+        """Why each lever can't help, in a few words: switched off, at its limit, or how little its best step does."""
+        best = {c["operation"]: c for c in candidates}
+        parts = []
+        for op in self.levers:
+            name, unit = NAMES[op]
+            why = self._excluded(op, now_ms)
+            if why:
+                parts.append(f"{name} {why if why in ('switched off', 'pinned') else 'stopped'}")
+            elif op in best and best[op]["full_step_change_mm"] != 0:
+                c, step = best[op], self.levers[op]["max_step"] * (self.cfg["floor_step_factor"] if self._floor else 1)
+                parts.append(f"{name} {math.copysign(step, c['value'] - c['from']):+g} {unit} "
+                             f"{c['full_step_change_mm']:+.3f} mm")
+            else:
+                parts.append(f"{name} at its limit ({current[op]:g} {unit})")
+        return f"{', '.join(parts)}; a step must give {bar:.3f} mm"
 
     def _settled(self, now_ms, estimate):
         """The heater has been on target and LEVEL_S of estimates since the last change show no trend: their last
@@ -760,52 +836,98 @@ class Controller:
                 else (lo, mid)
         return (lo + hi) / 2
 
+    def _edge(self, op, value):
+        """The cost of standing in the outer headroom_fraction of a lever's range: up to headroom_weight at the bound."""
+        lo, hi = self.levers[op]["bounds"]
+        zone = self.cfg["headroom_fraction"] * (hi - lo)
+        return self.cfg["headroom_weight"] * max(0.0, 1 - min(value - lo, hi - value) / zone) if zone > 0 else 0.0
+
+    def _score(self, moves, change, goal):
+        cfg = self.cfg
+        score = cfg["residual_weight"] * abs(goal - change) / abs(goal)
+        for op, v, c in moves:
+            spec = self.levers[op]
+            score += spec["cost"] + cfg["step_penalty"] * abs(v - c) / spec["max_step"] + \
+                max(0.0, self._edge(op, v) - self._edge(op, c))
+        return score
+
     def _plan_model(self, now_ms, current, measured, estimate, context, error):
+        """The cheapest useful move: one lever or (pair_moves) two. Returns (best or None, one candidate per lever,
+        reach)."""
         cfg = self.cfg
         goal = cfg["kappa"] * error
+        direction = 1 if error > 0 else -1
+        bar = cfg["min_effect_fraction"] * abs(goal)
         scale = self._flow_scale(current, measured, context, self._width(self._settings(current, measured), context))
 
-        def width(op=None, v=None):
-            return self._width(self._settings(current, measured, op, v, scale), context)
+        def width(*moves):
+            s = self._settings(current, measured, flow_scale=scale)
+            for op, v in moves:
+                self._move(s, current, op, v, scale)
+            return self._width(s, context)
 
         w0 = width()
-        candidates, best, combo = [], None, {}
+        candidates, plans, combo, steps, full = [], [], {}, {}, {}
         for op, spec in self.levers.items():
-            why = self._excluded(op, now_ms)
             c = current[op]
             lo, hi = self._window(op, c)
             values = [v for v in range(math.ceil(lo - 1e-9), math.floor(hi + 1e-9) + 1)
                       if abs(v - c) >= 0.5 and (op, v) not in self._refused]
-            if why or not values:
+            if self._excluded(op, now_ms) or not values:
                 continue
+            # A smaller step promises less by design: a tuned lever is judged on its configured step.
+            base = spec["max_step"] * (cfg["floor_step_factor"] if self._floor else 1)
+            full[op] = {d: min(spec["bounds"][1], max(spec["bounds"][0], c + d * base)) for d in (1, -1)}
+            tuned = self.max_step(op) < spec["max_step"]
             top = None
             for v in values:
-                change = width(op, v) - w0
-                residual = abs(goal - change) / abs(goal)
-                score = spec["cost"] + cfg["residual_weight"] * residual + cfg["step_penalty"] * abs(v - c) / spec[
-                    "max_step"]
-                if top is None or score < top["score"]:
-                    top = {"operation": op, "value": v, "from": c, "predicted_change_mm": change,
-                           "residual": residual, "score": score}
-            base = spec["max_step"] * (cfg["floor_step_factor"] if self._floor else 1)
-            full = min(spec["bounds"][1], max(spec["bounds"][0], c + math.copysign(base, top["value"] - c)))
-            top["full_step_change_mm"] = width(op, full) - w0
-            candidates.append(top)
-            if best is None or top["score"] < best["score"]:
-                best = top
-            change, v = max(((width(op, v) - w0, v) for v in spec["bounds"]), key=lambda e: e[0] * error)
+                change = width((op, v)) - w0
+                d = 1 if v > c else -1
+                plan = {"operation": op, "value": v, "from": c, "predicted_change_mm": change,
+                        "residual": abs(goal - change) / abs(goal), "score": self._score(((op, v, c),), change, goal),
+                        "full_step_change_mm": width((op, full[op][d])) - w0}
+                plan["promise_mm"] = plan["full_step_change_mm"] if tuned else change
+                plans.append(plan)
+                if top is None or plan["score"] < top["score"]:
+                    top = plan
+            candidates.append({k: top[k] for k in ("operation", "value", "from", "predicted_change_mm", "residual",
+                                                    "score", "full_step_change_mm")})
+            # The way this lever helps on its own, if any: a pair moves each lever that way.
+            helps = [d for d in (1, -1) if (width((op, full[op][d])) - w0) * direction > 0 and full[op][d] != c]
+            if helps:
+                steps[op] = [v for v in values if (v - c) * helps[0] > 0]
+            change, v = max(((width((op, v)) - w0, v) for v in spec["bounds"]), key=lambda e: e[0] * error)
             if change * error > 0:
                 combo[op] = v
+        if cfg["pair_moves"]:
+            order = sorted(steps, key=lambda op: -self.levers[op]["effect_delay_s"])  # the slower lever goes first
+            for i, a in enumerate(order):
+                for b in order[i + 1:]:
+                    tuned = self.max_step(a) < self.levers[a]["max_step"] or self.max_step(b) < self.levers[b]["max_step"]
+                    for va in steps[a]:
+                        for vb in steps[b]:
+                            change = width((a, va), (b, vb)) - w0
+                            moves = ((a, va, current[a]), (b, vb, current[b]))
+                            full_change = width((a, full[a][1 if va > current[a] else -1]),
+                                                (b, full[b][1 if vb > current[b] else -1])) - w0 if tuned else change
+                            plans.append({"operation": a, "value": va, "from": current[a], "predicted_change_mm": change,
+                                          "residual": abs(goal - change) / abs(goal),
+                                          "score": self._score(moves, change, goal), "full_step_change_mm": full_change,
+                                          "promise_mm": full_change, "first_change_mm": width((a, va)) - w0,
+                                          "then": {"operation": b, "value": vb}})
+        useful = [p for p in plans if p["predicted_change_mm"] * direction > 0 and p["promise_mm"] * direction >= bar]
+        best = min(useful, key=lambda p: p["score"]) if useful else None
         # Reach: every usable lever at its helpful bound at once; walking levers to bounds for less is pointless.
-        settings = self._settings(current, measured, flow_scale=scale)
-        for op, v in combo.items():
-            if op == "flow_percent":
-                settings["flow"] = v * scale
-            elif op in MODEL_KEYS:
-                settings[MODEL_KEYS[op]] = v
-            else:
-                settings["nozzle_c"] += v - current[op]
-        return best, candidates, self._width(settings, context) - w0
+        return best, candidates, width(*combo.items()) - w0
+
+    @staticmethod
+    def _move(settings, current, op, value, flow_scale):
+        if op == "flow_percent":
+            settings["flow"] = value * flow_scale
+        elif op in MODEL_KEYS:
+            settings[MODEL_KEYS[op]] = value
+        else:  # the actual nozzle follows the target by the same step
+            settings["nozzle_c"] += value - current[op]
 
     def _plan_fallback(self, now_ms, current, measured, estimate, context, error):
         """Flow only: width proportional to flow below the melt limit, so flow scales by the asked width ratio."""
@@ -829,4 +951,5 @@ class Controller:
         best = {"operation": op, "value": value, "from": c, "predicted_change_mm": change,
                 "full_step_change_mm": mm * (full - c) / c,
                 "residual": abs(cfg["kappa"] * error - change) / abs(cfg["kappa"] * error), "score": 1.0}
-        return best, [best], reach
+        tuned = self.max_step(op) < self.levers[op]["max_step"]
+        return {**best, "promise_mm": best["full_step_change_mm"] if tuned else change}, [best], reach

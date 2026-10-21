@@ -20,6 +20,8 @@ const signed = (v, d = 2) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).t
 const clock = t => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const unitOf = op => BY_OP[op]?.unit ?? "";
 const nameOf = op => BY_OP[op]?.name.toLowerCase() ?? op;
+// A pair's first command names its second; the second says it is one (D53).
+const pairText = r => (r.then ? `, then ${moveText(r.then.operation, null, r.then.value)}` : /second half of/.test(r.reason || "") ? " (second of a pair)" : "");
 const moveText = (op, from, to) => `${nameOf(op)} ${isNum(from) ? `${fmt(from, 0)} → ` : "→ "}${fmt(to, 0)} ${unitOf(op)}`;
 
 // ---- state ------------------------------------------------------------------------------------------------------------
@@ -305,7 +307,7 @@ function derive(prev, r) {
   if (r.action && r.sent === true) {
     const from = prev[BY_OP[r.action.operation]?.key];
     derived.push({ t: r.t_ms, tag: "auto", mark: "auto", op: r.action.operation, value: r.action.value,
-      text: `${moveText(r.action.operation, from, r.action.value)}${r.floor ? " · floor rules" : ""}${isNum(r.predicted_mm) ? ` · predicted ${fmt(r.predicted_mm, 2)} mm` : ""}`,
+      text: `${moveText(r.action.operation, from, r.action.value)}${pairText(r)}${r.floor ? " · floor rules" : ""}${isNum(r.predicted_mm) ? ` · predicted ${fmt(r.predicted_mm, 2)} mm` : ""}`,
       short: `${nameOf(r.action.operation)} ${fmt(r.action.value, 0)}` });
   } else if (r.action && r.sent === false && !(prev.action && prev.sent === false && prev.reason === r.reason)) {
     derived.push({ t: r.t_ms, tag: "refused", text: `${moveText(r.action.operation, null, r.action.value)} not sent: ${(r.reason || "").replace(/^.*not sent:\s*/, "")}` });
@@ -618,8 +620,8 @@ $("#steps").replaceChildren(...STEPS.map(([name, sub]) => {
 }));
 
 const ALARMS = [
-  [/no usable lever can move the width/, "No lever Auto may use can move the width",
-    "the printer model predicts too little from the levers that are on and not at a limit (flow barely matters while the hotend is at its melt limit; speed stops at 100 %). Switch another lever on, or change the target."],
+  [/no usable lever can move the width/, "No move Auto may use can move the width",
+    "no lever alone, and no two together, promise enough: the ones that are on are at a limit or barely move the width (numbers below). Switch another lever on, or change the target."],
   [/target out of reach/, "Target out of reach", "even the allowed levers at their limits can't get there: change the target or allow more levers"],
   [/not applied by the printer/, "The printer didn't apply Auto's command", "confirmed by LEAM's gateway, but the readback never changed: switch Auto off and on to re-arm"],
   [/commands in a row failed/, "Auto's commands keep failing", "switch Auto off and on to re-arm once the cause is fixed"],
@@ -635,7 +637,7 @@ function explain(r) {
   const floor = /^floor rules:\s*/.test(raw);
   raw = raw.replace(/^floor rules:\s*/, "");
   const out = (step, state, title, detail = "", progress = null) => ({ step, state, title, detail, progress, walls: walls?.[1], floor });
-  const act = r.action ? moveText(r.action.operation, rows.length > 1 ? rows[rows.length - 2][BY_OP[r.action.operation]?.key] : null, r.action.value) : "";
+  const act = r.action ? moveText(r.action.operation, rows.length > 1 ? rows[rows.length - 2][BY_OP[r.action.operation]?.key] : null, r.action.value) + pairText(r) : "";
   const pred = isNum(r.predicted_mm) ? `model predicts ${fmt(r.predicted_mm, 2)} mm` : "";
   let m;
   if (r.action && r.sent === true) return out(3, "active", `Sent ${act}`, pred);

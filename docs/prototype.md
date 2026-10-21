@@ -231,7 +231,8 @@ zone, walls line, Auto-on spans and markers for Auto's commands, the operator's 
 nozzle below on the same time axis. Right: the *Auto loop* (measure → compare → confirm → act → settle, with the current
 step in plain words and the controller's own reason), the levers (readback, Auto on/off, Auto's step, nudges and Set),
 *Auto settings* (confirm time and readings, step size, hands-off time, first Auto layer, walls step; each with its
-deployment default and a reset, D52) and an event list. Everything comes from `/api/trace` and `/api/control`, so every open page shows the same history;
+deployment default and a reset, D52) and an event list. A two-lever move (D53) shows as "nozzle 215 → 220 °C, then flow
+110 → 120 %" and its second command as "(second of a pair)". Everything comes from `/api/trace` and `/api/control`, so every open page shows the same history;
 nothing image-like is stored.
 
 ## Demo setup (recommended)

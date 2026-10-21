@@ -39,6 +39,13 @@ DEFAULTS = {
     "group_rule": "two_groups",
     "residual_weight": 20.0,
     "step_penalty": 0.5,
+    # Two levers in one move (D53): where the bead is capped by both the asked flow and the melt rate, one lever alone
+    # does almost nothing. Sent as two commands, the slower lever first, then settled once.
+    "pair_moves": True,
+    # Moving into the outer headroom_fraction of a lever's range costs up to headroom_weight (at the bound), so Auto
+    # spreads a change over levers instead of pinning one at its limit; moving out of it is free.
+    "headroom_fraction": 0.2,
+    "headroom_weight": 10.0,  # as much as the nozzle's cost: a pinned lever is worth a slower one
     "min_effect_fraction": 0.2,  # best candidate must promise this share of the asked change, else hold
     "min_confidence": 0.5,
     "max_estimate_age_ms": 5000,
@@ -69,7 +76,8 @@ FLOORS = {"min_spacing_ms": (2000, None), "max_failures": (1, 3), "foreign_hold_
           "widen_response_ratio": (0.3, 1.0), "persist_s": (0, None), "persist_estimates": (1, None),
           "persist_gap_s": (1, None),
           "min_width_mm": (0.8, 2.0), "floor_min_confidence": (0.3, None),
-          "floor_step_factor": (1.0, 2.0), "floor_hold_s": (0, 60), "floor_release_mm": (0, 0.2)}
+          "floor_step_factor": (1.0, 2.0), "floor_hold_s": (0, 60), "floor_release_mm": (0, 0.2),
+          "headroom_fraction": (0.0, 0.5), "headroom_weight": (0.0, None)}
 
 
 # What the operator may set at runtime on the Test bench, and the range the app accepts (int: whole numbers only).

@@ -607,7 +607,7 @@ class Pipeline:
                "flow": setpoints.get("flow_percent"), "speed": setpoints.get("speed_override_percent"),
                "nozzle_target": setpoints.get("nozzle_temperature_c"), "nozzle_c": measured.get("nozzle_c"),
                "extruding": measured.get("extruding"), "layer": context.get("layer"),
-               "action": out.get("action"), "sent": out.get("sent"), "hold": out.get("hold"),
+               "action": out.get("action"), "then": out.get("then"), "sent": out.get("sent"), "hold": out.get("hold"),
                "floor": out.get("floor"), "dry": out.get("dry"), "error_mm": out.get("error_mm"),
                "predicted_mm": out.get("predicted_mm"), "reason": (out.get("reason") or "")[:TRACE_REASON_CHARS],
                "candidates": [{k: c.get(k) for k in ("operation", "value", "from", "predicted_change_mm", "score")}

@@ -311,6 +311,8 @@ def safety_problems(out, rig):
     # the one sanctioned exception to the step limits (D48): a floor-rules decision widening a bead narrower than
     # wanted, sent on the tick it was decided
     floor_at = {t for t, d, *_ in getattr(rig, "ticks", ()) if d.get("floor") and (d.get("error_mm") or 0) > 0}
+    # a pair's second half (D53) follows its first once the readback shows it; the next command waits for both
+    second_half = {t for t, d, *_ in getattr(rig, "ticks", ()) if "second half of" in (d.get("reason") or "")}
     sequences = [r["request"]["sequence"] for r in rig.requests]
     if sequences != sorted(set(sequences)):
         problems.append(f"sequences not strictly increasing: {sequences}")
@@ -337,17 +339,24 @@ def safety_problems(out, rig):
         bad = validate(req, CONTROLLER_ID, SESSION_ID, 0, r["t_ms"])
         if bad:
             problems.append(f"{t_s}: the gateway would refuse it: {bad}")
+        state, until = rig.final.get(rid), t_s
+        if state == "setting_confirmed":
+            until += spec["effect_delay_s"] + cfg["settle_samples"] - 1
+        elif state in ("rejected", "dispatch_unknown", "queued_unconfirmed"):
+            until += cfg["explain_wait_ms"] / 1000
         if previous:
-            p_t, p_op, p_state = previous
+            p_t, p_op, p_value, p_state, p_until = previous
             gap = t_s - p_t
-            need = max(cfg["min_spacing_ms"] / 1000, ABSOLUTE_SPACING_S)
-            if p_state == "setting_confirmed":
-                need = max(need, cfg["levers"][p_op]["effect_delay_s"] + cfg["settle_samples"] - 1)
-            elif p_state in ("rejected", "dispatch_unknown", "queued_unconfirmed"):
-                need = max(need, cfg["explain_wait_ms"] / 1000)
-            if gap < need:
-                problems.append(f"{t_s}: {op} only {gap:.1f} s after {p_op} ({p_state}; needs {need:.0f} s)")
-        previous = (t_s, op, rig.final.get(rid))
+            spacing = max(cfg["min_spacing_ms"] / 1000, ABSOLUTE_SPACING_S)
+            if gap < spacing:
+                problems.append(f"{t_s}: {op} only {gap:.1f} s after {p_op} (spacing {spacing:.0f} s)")
+            if r["t_ms"] in second_half:
+                if out[COLUMN[p_op]][min(np.searchsorted(out["t_s"], t_s), len(out["t_s"]) - 1)] != p_value:
+                    problems.append(f"{t_s}: {op} as the second half before {p_op} {p_value} showed")
+                until = max(until, p_until)
+            elif t_s < p_until:
+                problems.append(f"{t_s}: {op} only {gap:.1f} s after {p_op} ({p_state}; needs {p_until - p_t:.0f} s)")
+        previous = (t_s, op, value, state, until)
     problems += [f"request {rid} published {n} times" for rid, n in seen.items() if n > 1]
     return problems
 

@@ -273,6 +273,8 @@ def safety_violations(out, config=None):
     columns = dict(zip(OPS, ("flow_percent", "speed_override_percent", "nozzle_target_c")))
     confirmed = {int(q) for q, st in zip(out["result_sequence"], out["result_state"]) if st == "setting_confirmed"}
     seq_of = dict(zip(np.round(out["action_t_s"] * 1000).astype(int), out["action_sequence"]))
+    # a pair's second half (D53) follows its confirmed first half; the next command waits for both to settle
+    second_half = {d.t_ms for d, *_ in loop.decisions if "second half of" in (d.reason or "")}
     previous = None
     for t_ms, op, value, rid, _ in loop.sent:
         t_s = (t_ms - T0_MS) / 1000
@@ -292,17 +294,21 @@ def safety_violations(out, config=None):
             problems.append(f"{t_s}: {op}={value} not rounded")
         if not gate or not auto:
             problems.append(f"{t_s}: sent with gate={gate} auto={auto}")
+        ok = seq_of.get(round(t_s * 1000)) in confirmed
+        # settled = confirmed + effect delay + settle_samples samples at <= 1 Hz; failed = explained by a readback
+        until = t_s + (spec["effect_delay_s"] + cfg["settle_samples"] - 1 if ok else cfg["explain_wait_ms"] / 1000)
         if previous:
-            p_t, p_op, p_ok = previous
+            p_t, p_op, p_value, p_ok, p_until = previous
             gap = t_s - p_t
             if gap < cfg["min_spacing_ms"] / 1000:
                 problems.append(f"{t_s}: spacing {gap:.1f} s")
-            # settled = confirmed + effect delay + settle_samples samples at <= 1 Hz; failed = explained by a readback
-            need = cfg["levers"][p_op]["effect_delay_s"] + cfg["settle_samples"] - 1 if p_ok else \
-                cfg["explain_wait_ms"] / 1000
-            if gap < need:
-                problems.append(f"{t_s}: {op} only {gap:.1f} s after {p_op} (needs {need} s)")
-        previous = (t_s, op, seq_of.get(round(t_s * 1000)) in confirmed)
+            if t_ms in second_half:  # its first half must show in the readback (the truth, D53), not only in a result
+                if out[columns[p_op]][np.searchsorted(out["t_s"], t_s)] != p_value:
+                    problems.append(f"{t_s}: {op} as the second half before {p_op} {p_value} showed")
+                until = max(until, p_until)
+            elif t_s < p_until:
+                problems.append(f"{t_s}: {op} only {gap:.1f} s after {p_op} (needs {p_until - p_t:g} s)")
+        previous = (t_s, op, value, ok, until)
     return problems
 
 
@@ -516,7 +522,7 @@ def test_a_smaller_step_does_not_make_a_melt_limited_lever_look_useful():
         r.c.tune({"speed_override_percent": {"enabled": False}, "nozzle_temperature_c": {"enabled": False},
                   "flow_percent": {"max_step": step}})
         d = r.act(1.198)
-        assert d.action is None and d.reason.endswith("alarm: no usable lever can move the width"), (step, d.reason)
+        assert d.action is None and "alarm: no usable lever can move the width (" in d.reason, (step, d.reason)
 
 
 def test_the_floor_rules_act_inside_a_wide_band():
@@ -904,7 +910,7 @@ def test_external_readback_change_pins_the_lever_and_holds_everything():
     r.sp["flow_percent"] = 95.0
     r.step(1.30)
     r.step(1.30, dt_ms=30_000)
-    assert r.act(1.30).reason == "alarm: no usable lever can move the width"  # only flow works here
+    assert r.act(1.30).reason.startswith("alarm: no usable lever can move the width (")  # only flow works here
 
 
 def test_own_command_is_never_taken_for_an_external_change():
@@ -1169,7 +1175,7 @@ def test_a_failed_value_is_never_proposed_again_until_rearmed_or_a_new_target(st
 
 
 def test_nozzle_change_is_gated_for_its_own_30_s_effect_delay():
-    r = Rig(StubPrinterModel(melt_width_mm=MELTY), target=1.45).armed(1.29)
+    r = Rig(StubPrinterModel(melt_width_mm=MELTY), config={"pair_moves": False}, target=1.45).armed(1.29)
     r.c.note_external("speed_override_percent", 100.0, r.t - 60_000)
     d = r.act(1.29)
     assert d.action["operation"] == "nozzle_temperature_c"
@@ -1716,7 +1722,7 @@ def test_mismatch_grid(name, seed):
         assert spec["expect"] == "biased" or (start is None and err.min() > 0.25)
     else:
         pinned = [d.reason for d, *_ in out["loop"].decisions if T0_MS + 181_000 <= d.t_ms < T0_MS + 450_000]
-        assert "alarm: no usable lever can move the width" in pinned
+        assert any(r.startswith("alarm: no usable lever can move the width (") for r in pinned)
         assert not any(s[1] == "flow_percent" and T0_MS + 150_000 <= s[0] < T0_MS + 450_000 for s in out["loop"].sent)
         assert converged_at(out, 450) is not None
 
@@ -1912,3 +1918,63 @@ def test_operator_settings_apply_over_the_deployment_and_report_its_defaults():
     assert c.cfg["min_width_mm"] == 1.45 and c.cfg["floor_step_factor"] != 5.0, "an invalid set changes nothing"
     c.configure({})
     assert (c.cfg["min_width_mm"], c.cfg["kappa"]) == (1.30, control_config.DEFAULTS["kappa"])
+
+
+KNEE = dict(melt_width_mm=1.5, softness_mm=0.01)  # asked = meltable at 100 % / 220 C: each caps the other
+
+
+def test_a_pair_moves_two_levers_when_each_alone_is_capped_by_the_other():
+    # Live 21 Oct 19:12: speed at its bound, flow +10 % and nozzle +5 C each did ~0.01 mm, together ~0.08 (D53).
+    r = Rig(StubPrinterModel(**KNEE), config=NOW, target=1.7).armed(1.5)
+    r.c.tune({"speed_override_percent": {"enabled": False}})
+    d = r.act(1.5)
+    assert d.action["operation"] == "nozzle_temperature_c" and d.then["operation"] == "flow_percent", d.reason
+    assert d.predicted_mm - 1.5 > 4 * max(c["predicted_change_mm"] for c in d.candidates), "more than either alone"
+    assert d.reason == f"nozzle 220 °C -> {d.action['value']:g} + flow 100 % -> {d.then['value']:g}"
+    r.send(d)
+    assert r.step(1.5).reason.startswith("waiting for nozzle"), "the second half waits for the first's readback"
+    r.sp["nozzle_temperature_c"] = float(d.action["value"])
+    r.c.note_result(1, "setting_confirmed", r.t)
+    confirmed = r.t
+    second = r.step(None)  # decided already: no fresh estimate needed
+    assert second.action == d.then and "second half of" in second.reason and not second.hold
+    assert second.candidates[0]["from"] == 100.0
+    r.c.note_sent("flow_percent", second.action["value"], 2, r.t)
+    r.sp["flow_percent"] = float(second.action["value"])
+    r.c.note_result(2, "setting_confirmed", r.t)
+    assert r.step(1.5).reason.startswith("waiting for flow")
+    assert r.c.estimate_since() == confirmed + 30_000, "the pair settles on the slower lever's effect"
+
+
+def test_a_pair_is_dropped_when_its_first_half_is_not_sent_or_someone_else_moves_a_lever():
+    r = Rig(StubPrinterModel(**KNEE), config=NOW, target=1.7).armed(1.5)
+    r.c.tune({"speed_override_percent": {"enabled": False}})
+    d = r.act(1.5)
+    r.c.note_unsent(d.action["operation"], d.action["value"], r.t)  # dry run or refused by the send guard
+    assert r.c._next is None
+    r = Rig(StubPrinterModel(**KNEE), config=NOW, target=1.7).armed(1.5)
+    r.c.tune({"speed_override_percent": {"enabled": False}})
+    d = r.act(1.5)
+    r.send(d)
+    r.c.note_external("flow_percent", 105.0, r.t)
+    assert r.c._next is None
+
+
+def test_advice_shows_a_pair_and_keeps_nothing_to_send():
+    r = Rig(StubPrinterModel(**KNEE), config=NOW, target=1.7, auto=False).armed(1.5)
+    r.c.tune({"speed_override_percent": {"enabled": False}})
+    d = r.act(1.5)
+    assert d.mode == "advise" and d.then and " + flow 100 % -> " in d.reason and r.c._next is None
+
+
+def test_a_lever_near_its_bound_is_spared_for_one_in_the_middle():
+    # Speed at 66 % in 60-100 (D53): walking it to 60 % leaves Auto nothing to widen with next time.
+    plain = Rig(StubPrinterModel(melt_width_mm=0.9), config={**NOW, "headroom_weight": 0.0}, target=1.5)
+    spared = Rig(StubPrinterModel(melt_width_mm=0.9), config=NOW, target=1.5)  # melt-limited at 66 %: flow can't help
+    for r in (plain, spared):
+        r.sp["speed_override_percent"] = 66.0
+        r.armed(1.36)
+    assert plain.act(1.36).action["operation"] == "speed_override_percent"
+    d = spared.act(1.36)
+    assert d.action["value"] >= 62 if d.action["operation"] == "speed_override_percent" else True
+    assert {d.action["operation"], (d.then or {}).get("operation")} != {"speed_override_percent", None}, d.reason
