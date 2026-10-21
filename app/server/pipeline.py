@@ -134,8 +134,9 @@ def env_controller(environ=None):
     """Controller overrides from CONTROL_PIN_S (seconds an operator's change is left alone), CONTROL_MIN_LAYER (first
     layer Auto may act on), CONTROL_FLOOR_STEP_FACTOR (step multiple under the floor rules, 1-2), CONTROL_PERSIST_S and
     CONTROL_PERSIST_ESTIMATES (how long a deviation must last), CONTROL_KAPPA (share of the gap per command) and
-    CONTROL_MIN_WIDTH_MM (the walls limit); a bad value keeps that setting's default. The operator's settings on the Test
-    bench go over these."""
+    CONTROL_MIN_WIDTH_MM (the walls limit) and the lever bounds CONTROL_{FLOW,SPEED,NOZZLE}_{MIN,MAX} (whole numbers
+    inside LEAM's ranges); a bad value keeps that setting's default. The operator's settings on the Test bench go over
+    these."""
     environ = os.environ if environ is None else environ
     overrides = {}
     for var, key, cast in (("CONTROL_PIN_S", "pin_s", float), ("CONTROL_MIN_LAYER", "min_layer", int),
@@ -154,6 +155,25 @@ def env_controller(environ=None):
             log.warning("ignoring %s=%r: keeping the default %s", var, raw, control_config.DEFAULTS[key])
             continue
         overrides[key] = value
+    bounds = {}
+    for short, op in (("FLOW", "flow_percent"), ("SPEED", "speed_override_percent"), ("NOZZLE", "nozzle_temperature_c")):
+        for end in ("MIN", "MAX"):
+            var, raw = f"CONTROL_{short}_{end}", environ.get(f"CONTROL_{short}_{end}")
+            if raw is None:
+                continue
+            key = f"{op}_{end.lower()}"
+            try:
+                value = int(raw)
+                control_config.load(control_config.with_operator(None, {**bounds, key: value}))
+                lo, hi, _ = control_config.OPERATOR[key]
+                if not lo <= value <= hi:
+                    raise ValueError
+            except ValueError:
+                log.warning("ignoring %s=%r: keeping LEAM's range", var, raw)
+                continue
+            bounds[key] = value
+    if bounds:
+        overrides = control_config.with_operator(overrides, bounds)
     return overrides or None
 
 

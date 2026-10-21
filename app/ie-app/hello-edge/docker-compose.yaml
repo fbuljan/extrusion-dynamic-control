@@ -35,6 +35,13 @@ services:
       CONTROL_KAPPA: ${CONTROL_KAPPA:-0.5}
       # Walls limit: below it the alarm shows and Auto's floor rules act (controller default 1.30); D52.
       CONTROL_MIN_WIDTH_MM: ${CONTROL_MIN_WIDTH_MM:-1.30}
+      # Lever bounds for Auto, inside LEAM's ranges (default: LEAM's own; the Test bench can narrow them further); D54.
+      CONTROL_FLOW_MIN: ${CONTROL_FLOW_MIN:-0}
+      CONTROL_FLOW_MAX: ${CONTROL_FLOW_MAX:-200}
+      CONTROL_SPEED_MIN: ${CONTROL_SPEED_MIN:-10}
+      CONTROL_SPEED_MAX: ${CONTROL_SPEED_MAX:-200}
+      CONTROL_NOZZLE_MIN: ${CONTROL_NOZZLE_MIN:-190}
+      CONTROL_NOZZLE_MAX: ${CONTROL_NOZZLE_MAX:-250}
       # Averaging window of the displayed width in s (the controller keeps its own 25 s); D51.
       DISPLAY_WINDOW_S: ${DISPLAY_WINDOW_S:-15}
     logging:

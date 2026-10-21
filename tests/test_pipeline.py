@@ -27,7 +27,7 @@ from server import bridge as bridge_module
 from server import control_config
 from server.bridge import REQUEST_TOPIC, Bridge
 from server.control_state import ControlState
-from server.controller import Decision
+from server.controller import Controller, Decision
 from server.model_stubs import StubCameraModel, StubPrinterModel
 from server.pipeline import Pipeline, geometry_version, load_models, width_config_hash
 from server.store import Store
@@ -1611,6 +1611,13 @@ def test_env_controller_reads_the_operator_pin_and_ignores_bad_values():
     for bad in ("inf", "nan", "-inf"):
         assert env_controller({"CONTROL_PIN_S": bad, "CONTROL_FLOOR_STEP_FACTOR": bad}) is None
     assert env_controller({"CONTROL_FLOOR_STEP_FACTOR": "2"}) == {"floor_step_factor": 2.0}
+    nozzle = env_controller({"CONTROL_NOZZLE_MAX": "220"})
+    assert nozzle["levers"]["nozzle_temperature_c"]["bounds"] == (190, 220), "a deploy-time bound (D54)"
+    assert Controller(StubPrinterModel(), nozzle).limits()["defaults"]["nozzle_temperature_c_max"] == 220
+    for bad in ("260", "185", "219.5", "x"):
+        assert env_controller({"CONTROL_NOZZLE_MAX": bad}) is None, bad
+    assert env_controller({"CONTROL_FLOW_MIN": "150", "CONTROL_FLOW_MAX": "140"})["levers"]["flow_percent"]["bounds"] \
+        == (150, 200), "a max that crosses the min is dropped, not the min"
     assert env_controller({"CONTROL_FLOOR_STEP_FACTOR": "2.5"}) is None  # outside 1-2: keep the default
     assert env_controller({"CONTROL_PIN_S": "60"}) == {"pin_s": 60.0}
     assert env_controller({"CONTROL_PIN_S": "10"}) is None  # below the floor: keep the default
