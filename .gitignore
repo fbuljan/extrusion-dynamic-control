@@ -6,9 +6,20 @@ CLAUDE.local.md
 .claude/settings.local.json
 
 # Recordings, organiser data, calibration files — local only (public repo; IR must never be stored anywhere)
+# .data/ is the dev app's DATA_DIR: settings.json there can hold passwords
 data/
+.data/
 *.tiff
 *.npz
+app/models/*
+!app/models/README.md
+cfg-data/
+*.npy
+*.pkl
+*.parquet
+*.jpg
+*.jpeg
+*.db
 
 # Python
 __pycache__/

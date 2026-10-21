@@ -5,3 +5,5 @@
 data
 **/dist
 **/__pycache__
+app/.venv
+app/models/*.bak
