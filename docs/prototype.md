@@ -147,6 +147,8 @@ Set `DATA_DIR` as above to keep runs out of the app folder: the default `app/.da
 | `CONTROL_PIN_S` | 300 | Seconds Auto leaves an operator's change alone (at least 60). A bad or non-finite value keeps the default |
 | `CONTROL_MIN_LAYER` | 6 | First layer Auto may act on (at least 1) |
 | `CONTROL_FLOOR_STEP_FACTOR` | 1.0 | Step multiple for a floor-rules widening step below 1.30 mm, 1–2 (D48) |
+| `CONTROL_PERSIST_S`, `CONTROL_PERSIST_ESTIMATES`, `CONTROL_KAPPA` | 10, 5, 0.5 | How long and over how many estimates a deviation must last, and the share of the gap one command closes (D51; the device runs 5, 3, 0.7) |
+| `DISPLAY_WINDOW_S` | 15 | Averaging window of the displayed width; the controller keeps 25 s (D51) |
 | `MODELS_DIR` | `app/models` | Folder with `geometry.json`, `camera_model.json`, `printer_model.json`. A missing file is a "no model" state, not a crash |
 | `DATA_DIR` | `app/.data` | `control.json` (target), `prototype.db`, `settings.json`. The image uses `/cfg-data` |
 | `FIRST_LAYER_MM`, `LAYER_MM`, `LINE_WIDTH_MM` | 0.7, 0.5, 1.5 | Slicing of the part being printed: layer counting (first 6 layers hold) and the printer model's context. A bad value is ignored with a warning |

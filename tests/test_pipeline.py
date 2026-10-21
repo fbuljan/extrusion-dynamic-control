@@ -980,7 +980,8 @@ def test_every_step_leaves_a_trace_row_and_manual_sends_are_events(sim):
     last = rows[-1]
     assert (last["target_mm"], last["band_below_mm"], last["band_above_mm"], last["auto"]) == (1.35, 0.1, 0.05, True)
     assert (last["flow"], last["speed"], last["nozzle_target"]) == (100, 100, 220) and last["reason"]
-    assert isinstance(last["mm"], float) and last["noise_mm"] == pytest.approx(2 * last["sigma_mm"])
+    judged = s.pipeline._judged  # the noise band is the controller's, from its own (longer, post-change) estimate
+    assert isinstance(last["mm"], float) and last["noise_mm"] == (pytest.approx(2 * judged["sigma_mm"]) if judged else None)
     assert [r["t_ms"] for r in s.pipeline.trace(rows[-2]["t_ms"])["rows"]] == [last["t_ms"]]
     s.pipeline.note_manual_send({"correction": {"operation": "flow_percent", "value": 90}}, {"ok": True})
     s.pipeline.note_manual_send({"correction": {"operation": "flow_percent", "value": 80}}, {"ok": False})
@@ -1390,7 +1391,7 @@ def test_pipeline_health_is_served_read_only_and_scalar(app):
     assert body["models"] == {"geometry": None, "camera_model": None, "printer_model": None}
     assert body["clock_offset_ms"] is None and body["clock_alarm"] is None and body["gate_open"] is False
     assert {"sent", "send_refused", "send_failed", "send_uncertain"} <= set(body["stats"])
-    assert body["settings"] == {"first_layer_mm": 0.7, "layer_mm": 0.5, "line_width_mm": 1.5}
+    assert body["settings"] == {"first_layer_mm": 0.7, "layer_mm": 0.5, "line_width_mm": 1.5, "display_window_s": 15.0}
 
     def scalars(v):
         return all(scalars(x) for x in v.values()) if isinstance(v, dict) else \
@@ -1596,3 +1597,14 @@ def test_env_controller_reads_the_operator_pin_and_ignores_bad_values():
     assert env_controller({"CONTROL_PIN_S": "soon"}) is None
     assert env_controller({"CONTROL_PIN_S": "60", "CONTROL_MIN_LAYER": "3"}) == {"pin_s": 60.0, "min_layer": 3}
     assert env_controller({"CONTROL_MIN_LAYER": "0"}) is None
+    fast = {"CONTROL_PERSIST_S": "5", "CONTROL_PERSIST_ESTIMATES": "3", "CONTROL_KAPPA": "0.7"}
+    assert env_controller(fast) == {"persist_s": 5.0, "persist_estimates": 3, "kappa": 0.7}
+    for bad in ({"CONTROL_PERSIST_ESTIMATES": "0"}, {"CONTROL_KAPPA": "1.5"}, {"CONTROL_KAPPA": "0"},
+                {"CONTROL_PERSIST_S": "-1"}, {"CONTROL_PERSIST_ESTIMATES": "2.5"}):
+        assert env_controller(bad) is None, bad
+
+
+def test_env_settings_reads_the_display_window():
+    from server.pipeline import env_settings
+    assert env_settings({"DISPLAY_WINDOW_S": "10"}) == {"display_window_s": 10.0}
+    assert env_settings({"DISPLAY_WINDOW_S": "0"}) == {} and env_settings({"DISPLAY_WINDOW_S": "x"}) == {}

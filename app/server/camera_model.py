@@ -6,7 +6,9 @@ Above the knee the IR stops reading wider (print 2: beads wider than the 1.5 mm 
 wall): the camera is blind there (`ceiling_mm`). real_mm stays linear up to knee + 2 ramps (a frame SD each), so
 a window of baseline frames scattered around the knee averages to the knee instead of below it, and clips beyond. Its
 sigma ramps up to the above-knee value over knee +- 1 ramp, so a window's median sigma doesn't flip frame to frame.
-Groups the file doesn't hold return None. A "relative" file holds IR widths in geometric mm (px / k_nom), not real
+Groups the file doesn't hold return None. A group marked "follower" was anchored to the fitted views of one print (its
+offset moves from print to print): the estimator learns its offset against the others and never lets it set the level.
+A "relative" file holds IR widths in geometric mm (px / k_nom), not real
 widths: fit only for holding the current width. The file records the geometry and extractor settings its widths came
 from (`geometry_version`, `width_config_hash`); widths made otherwise don't belong to this model.
 """
@@ -48,7 +50,8 @@ class CameraModel:
             raise ValueError(f"camera model: k must be positive, got {k}")
         return {"k": k, "offset": float(e["offset_px"]), "knee": math.inf if knee is None else float(knee),
                 "lo": float(lo), "hi": math.inf if hi is None else float(hi), "sigma": float(e["sigma_mm"]),
-                "k_rel_sd": float(e.get("k_rel_sd") or 0.0), "ramp": float(e.get("ramp_mm") or 0.0)}
+                "k_rel_sd": float(e.get("k_rel_sd") or 0.0), "ramp": float(e.get("ramp_mm") or 0.0),
+                "follower": e.get("follower") is True}
 
     @classmethod
     def load(cls, path=None, profile=None):
@@ -56,6 +59,11 @@ class CameraModel:
         if not path.exists():
             raise FileNotFoundError(f"camera model not found at {path} (local fit, see models/README.md)")
         return cls(json.loads(path.read_text()), profile)
+
+    def follower(self, group):
+        """A view anchored to the others rather than fitted: it may not set the absolute level."""
+        gp = self.groups.get(str(group))
+        return bool(gp and gp["follower"])
 
     def _terms(self, gp, nozzle_c, speed_mm_s):
         return self.g_T * (nozzle_c - self.ref_c) + self.s * (speed_mm_s - self.ref_speed) + gp["offset"]

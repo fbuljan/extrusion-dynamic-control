@@ -28,6 +28,13 @@ services:
       CONTROL_MIN_LAYER: ${CONTROL_MIN_LAYER:-6}
       # Step multiple Auto may take below 1.30 mm when widening (controller default 1.0, at most 2.0; D48).
       CONTROL_FLOOR_STEP_FACTOR: ${CONTROL_FLOOR_STEP_FACTOR:-1.0}
+      # How long and over how many estimates a deviation must last before Auto acts (controller default 10 s / 5), and
+      # the share of the gap one command aims to close (default 0.5); D51.
+      CONTROL_PERSIST_S: ${CONTROL_PERSIST_S:-10}
+      CONTROL_PERSIST_ESTIMATES: ${CONTROL_PERSIST_ESTIMATES:-5}
+      CONTROL_KAPPA: ${CONTROL_KAPPA:-0.5}
+      # Averaging window of the displayed width in s (the controller keeps its own 25 s); D51.
+      DISPLAY_WINDOW_S: ${DISPLAY_WINDOW_S:-15}
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}

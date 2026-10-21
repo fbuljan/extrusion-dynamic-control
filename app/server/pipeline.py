@@ -47,8 +47,12 @@ DEFAULTS = {
     "line_width_mm": 1.5,
     "max_clock_offset_ms": 2000,  # beyond this our clock or LEAM's is wrong: hold and say so
     "trace_s": 900,
+    # The dashboard's width averages over this many seconds; the controller keeps the estimator's 25 s, where a shorter
+    # window widens the noise band faster than it cuts the lag (D51).
+    "display_window_s": 15.0,
 }
-ENV_SETTINGS = {"FIRST_LAYER_MM": "first_layer_mm", "LAYER_MM": "layer_mm", "LINE_WIDTH_MM": "line_width_mm"}
+ENV_SETTINGS = {"FIRST_LAYER_MM": "first_layer_mm", "LAYER_MM": "layer_mm", "LINE_WIDTH_MM": "line_width_mm",
+                "DISPLAY_WINDOW_S": "display_window_s"}
 TARGET_ALARM = "alarm: target set under another camera model; set it again"
 STATS = ("frames_done", "frames_dropped", "sent", "send_refused", "send_failed", "send_uncertain", "foreign_results")
 TRACE_REASON_CHARS = 200
@@ -111,7 +115,7 @@ def env_settings(environ=None):
         if is_number(value) and value > 0:
             out[key] = value
         else:
-            log.warning("ignoring %s=%r: expected a positive number of mm; using %s", var, raw, DEFAULTS[key])
+            log.warning("ignoring %s=%r: expected a positive number; using %s", var, raw, DEFAULTS[key])
     return out
 
 
@@ -128,18 +132,21 @@ def _floor_widening(decision, current):
 
 def env_controller(environ=None):
     """Controller overrides from CONTROL_PIN_S (seconds an operator's change is left alone), CONTROL_MIN_LAYER (first
-    layer Auto may act on) and CONTROL_FLOOR_STEP_FACTOR (step multiple under the floor rules, 1-2); a bad value keeps
-    that setting's default."""
+    layer Auto may act on), CONTROL_FLOOR_STEP_FACTOR (step multiple under the floor rules, 1-2), CONTROL_PERSIST_S and
+    CONTROL_PERSIST_ESTIMATES (how long a deviation must last) and CONTROL_KAPPA (share of the gap per command); a bad
+    value keeps that setting's default."""
     environ = os.environ if environ is None else environ
     overrides = {}
     for var, key, cast in (("CONTROL_PIN_S", "pin_s", float), ("CONTROL_MIN_LAYER", "min_layer", int),
-                           ("CONTROL_FLOOR_STEP_FACTOR", "floor_step_factor", float)):
+                           ("CONTROL_FLOOR_STEP_FACTOR", "floor_step_factor", float),
+                           ("CONTROL_PERSIST_S", "persist_s", float), ("CONTROL_PERSIST_ESTIMATES", "persist_estimates", int),
+                           ("CONTROL_KAPPA", "kappa", float)):
         raw = environ.get(var)
         if raw is None:
             continue
         try:
             value = cast(raw)
-            if not math.isfinite(value) or key == "min_layer" and value < 1:
+            if not math.isfinite(value) or key in ("min_layer", "persist_estimates") and value < 1:
                 raise ValueError
             control_config.load({key: value})
         except ValueError:
@@ -178,6 +185,8 @@ class Pipeline:
         self.extractor = extractor if extractor is not None else WidthExtractor(geometry) if geometry else None
         self.controller = Controller(printer_model, controller_config)
         self.estimator = WidthEstimator(camera_model)
+        self.display = WidthEstimator(camera_model, {"window_s": self.cfg["display_window_s"]})
+        self._judged = None  # the controller's estimate at the last step
         self.motion = MotionBuffer()
         need = {"geometry": self.extractor is not None, "camera model": camera_model is not None}
         if self.controller.cfg["mode"] == "model":
@@ -253,10 +262,11 @@ class Pipeline:
 
     # for main.control_view ------------------------------------------------------------------------------------------
     def estimate(self, now=None):
-        """Display estimate: every recent sample, not the controller's post-change subset; age as of this call."""
+        """Display estimate: every recent sample over the display window, not the controller's post-change subset; age as
+        of this call."""
         now = self.clock() if now is None else now
         with self._est_lock:
-            return self.estimator.estimate(now)
+            return self.display.estimate(now)
 
     def last_decision(self):
         d = self._last_decision
@@ -480,8 +490,10 @@ class Pipeline:
         self._store("insert_width_samples", {
             "t_ms": local.t_ms, "camera": sample.camera, "width_px": sample.width_px, "mm_per_px": sample.mm_per_px,
             "confidence": sample.confidence, "reason": sample.reason, "group": sample.group, "t_dep_ms": local.t_dep_ms})
+        nozzle, speed = self._nozzle_at(t), (motion or {}).get("speed_mm_s")
         with self._est_lock:
-            mm = self.estimator.add(local, self._nozzle_at(t), (motion or {}).get("speed_mm_s"))
+            mm = self.estimator.add(local, nozzle, speed)
+            self.display.add(local, nozzle, speed)
         # Every frame's outcome for the Test bench: the width it gave, or why it gave none. Scalars only.
         seen = jsonable({"t_ms": local.t_ms, "mm": mm, "reason": sample.reason if mm is not None or sample.reason != "ok"
                          else "not_converted", "group": sample.group})
@@ -526,8 +538,8 @@ class Pipeline:
             return
         self._last_width_emit = now
         with self._est_lock:
-            est = self.estimator.estimate(now)
-            why = self.estimator.reason
+            est = self.display.estimate(now)
+            why = self.display.reason
         if est is None:
             missing = "no model: camera model" if "camera model" in self.missing else why
             self.emit({"type": "width", "mm": None, "reason": missing})
@@ -574,17 +586,19 @@ class Pipeline:
 
     def _trace_step(self, now, view, band, out):
         with self._est_lock:
-            est = self.estimator.estimate(now)
+            est = self.display.estimate(now)
         setpoints, measured, context = self._inputs(now)
         below, above = self.controller.band_mm(band)
         sigma = est["sigma_mm"] if est else None
+        judged_sigma = (self._judged or {}).get("sigma_mm")
         error, target = out.get("error_mm"), view["target_mm"]
         row = {"t_ms": now, "mm": est["mm"] if est else None, "sigma_mm": sigma,
                # what the controller judged: only beads laid since the last change, so it can differ from mm
                "judged_mm": target - error if is_number(error) and is_number(target) else None,
                "confidence": est["confidence"] if est else None, "n": est["n"] if est else None,
                "at_ceiling": bool(est and est.get("at_ceiling")),
-               "noise_mm": self.controller.cfg["sigma_factor"] * sigma if is_number(sigma) else None,
+               # the noise band Auto holds within: from the controller's own (longer) estimate
+               "noise_mm": self.controller.cfg["sigma_factor"] * judged_sigma if is_number(judged_sigma) else None,
                "target_mm": target, "band_below_mm": below, "band_above_mm": above,
                "auto": view["auto"] is True, "gate_open": self.gate_open(now),
                "flow": setpoints.get("flow_percent"), "speed": setpoints.get("speed_override_percent"),
@@ -621,7 +635,7 @@ class Pipeline:
                          None, None, [], True)
         else:
             with self._est_lock:
-                est = self.estimator.estimate(now, since_ms=self.controller.estimate_since())
+                est = self._judged = self.estimator.estimate(now, since_ms=self.controller.estimate_since())
             setpoints, measured, context = self._inputs(now)
             d = self.controller.step(now, est, None if problem else target, setpoints, measured, context,
                                      self.gate_open(now), auto, band)

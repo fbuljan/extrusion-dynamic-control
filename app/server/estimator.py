@@ -4,7 +4,9 @@ Clocks: everything is on the local clock. The window and staleness use the sampl
 gates on deposit time (`t_dep_ms`, which the caller converts to the local clock; without it the receive time stands in),
 so after a change only beads laid down after it are judged. The device clock (`t_ms`) is never compared with ours.
 Views (groups): each camera/side has its own offset the camera model doesn't know exactly; their relative offsets are
-learned slowly (zero mean, so the absolute level stays the camera model's) and removed before combining.
+learned slowly (zero mean, so the absolute level stays the camera model's) and removed before combining. A follower view
+(anchored, not fitted) learns its offset against the fitted views and is left out of the mean; until it has been seen
+next to one, an estimate made of followers alone is only half as confident.
 Per view: a median-guarded trimmed mean whose sigma is the single-sample noise scale learned over the last
 `noise_samples` samples (a MAD of the handful in one window is too noisy to gate on) over sqrt(n); then inverse-variance
 across views. The camera is blind above its knee: at_ceiling says the estimate is within knee_margin_mm of the
@@ -101,21 +103,26 @@ class WidthEstimator:
             return None
         return max(MAD_TO_SIGMA * statistics.median(self._residuals), self.cfg["min_spread_mm"])
 
+    def _follower(self, group):
+        fn = getattr(self.camera_model, "follower", None)
+        return bool(fn(group)) if callable(fn) else False
+
     def _harmonize(self, now_ms):
-        """Move each view's offset towards its last-minute median minus the views' mean, by an EMA."""
+        """Move each view's offset towards its last-minute median minus the fitted views' mean, by an EMA."""
         medians = {}
         for s in self._samples:
             if s[0] >= now_ms - HISTORY_MS:
                 medians.setdefault(s[2], []).append(s[3])
         medians = {g: statistics.median(v) for g, v in medians.items() if len(v) >= 3}
-        if len(medians) >= 2:
-            center = statistics.fmean(medians.values())
+        leaders = [m for g, m in medians.items() if not self._follower(g)]
+        if len(medians) >= 2 and leaders:
+            center = statistics.fmean(leaders)
             dt = 0.0 if self._offsets_ms is None else (now_ms - self._offsets_ms) / 1000
             a = 1 - math.exp(-max(dt, 0.0) / self.cfg["harmonize_s"])
             for g, m in medians.items():
                 self._offsets[g] = self._offsets.get(g, 0.0) + (m - center - self._offsets.get(g, 0.0)) * a
                 self._learning.setdefault(g, now_ms)
-            mean = statistics.fmean(self._offsets.values())
+            mean = statistics.fmean(o for g, o in self._offsets.items() if not self._follower(g))
             self._offsets = {g: o - mean for g, o in self._offsets.items()}
         self._offsets_ms = now_ms
 
@@ -174,6 +181,8 @@ class WidthEstimator:
         in_range = sum(s[5] for s in rows) / len(rows)
         confidence = statistics.fmean(s[6] for s in rows) * min(1.0, len(rows) / cfg["full_n"]) * min(1.0, 2 * in_range)
         if noise is None:  # sigma from a few samples' MAD is unreliable until the noise scale is learned
+            confidence *= 0.5
+        if all(self._follower(g) and g not in self._learning for g in groups):  # level never anchored on this print
             confidence *= 0.5
         active = sum(1 for t in self._seen.values() if t >= now_ms - cfg["group_memory_s"] * 1000)
         ceiling = getattr(self.camera_model, "ceiling_mm", None)

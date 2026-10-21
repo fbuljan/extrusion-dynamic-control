@@ -246,6 +246,41 @@ def test_view_offsets_are_learned_relative_and_removed():
     assert e["view_offsets_mm"] == {} and e["sigma_mm"] > 0.05  # disagreeing views widen sigma instead
 
 
+class FollowerCam(StubCameraModel):
+    """Views 2 and 3 are followers: anchored on another print, so their offsets are only roughly right."""
+
+    def follower(self, group):
+        return group in (2, 3)
+
+
+def test_follower_views_learn_their_offset_but_never_set_the_level():
+    # The fitted view reads true; the follower reads 0.3 mm wide (its anchor came from another print).
+    est = WidthEstimator(FollowerCam(offsets_px={1: 1.6, 2: 1.6}))
+    rng = np.random.default_rng(3)
+    for i in range(600):
+        group = 1 + i % 2
+        est.add(sample(i, 1.5 + (0.3 if group == 2 else 0.0) + rng.normal(0, 0.05), group=group), 220, 20)
+        est.estimate(now(i))  # offsets are learned as estimates are made, once a second in the app
+    e = est.estimate(now(599))
+    assert e["view_offsets_mm"]["1"] == pytest.approx(0.0, abs=0.02), "the fitted view keeps the level"
+    assert e["view_offsets_mm"]["2"] == pytest.approx(0.3, abs=0.03)
+    assert e["mm"] == pytest.approx(1.5, abs=0.03) and set(e["per_group"]) == {"1", "2"} and e["n"] >= 24, \
+        "the follower's samples count, at the fitted level"
+    plain = WidthEstimator(StubCameraModel(offsets_px={1: 1.6, 2: 1.6}))
+    rng = np.random.default_rng(3)
+    for i in range(600):
+        group = 1 + i % 2
+        plain.add(sample(i, 1.5 + (0.3 if group == 2 else 0.0) + rng.normal(0, 0.05), group=group), 220, 20)
+        plain.estimate(now(i))
+    assert plain.estimate(now(599))["mm"] == pytest.approx(1.65, abs=0.03), "without the flag the level splits the difference"
+
+
+def test_followers_alone_and_never_anchored_are_half_as_confident():
+    alone = fed(noisy(40), est=WidthEstimator(FollowerCam()), group=3)
+    fitted = fed(noisy(40), est=WidthEstimator(FollowerCam()), group=1)
+    assert alone.estimate(now(39))["confidence"] == pytest.approx(0.5 * fitted.estimate(now(39))["confidence"])
+
+
 @pytest.mark.parametrize("cap", [1.0, 1.5])
 def test_views_that_disagree_widen_sigma_until_their_offsets_are_learned(cap):
     # At 2 frames/s the random part alone is small enough for unlearned view offsets to look like a deviation.
