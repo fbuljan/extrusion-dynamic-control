@@ -13,5 +13,5 @@ Team knowledge for humans and agents. Start with `SOURCE_OF_TRUTH.md`. Connectio
 | `cameras-and-calibration.md` | What the cameras see, which frames to use, homography + scale fix, accuracy budget, measurement pipeline |
 | `control.md` | The five writable levers and request contract (schema 0.2.0), latency, Level 2 controller, Level 3 corner learner, step test, safety |
 | `edge-deployment.md` | Building the `.app`, compose rules, uploading and installing via IEM (verified), IECTL, what is still missing |
-| `decisions.md` | Decision log: one row per decision, one line of why (D1–D47) |
+| `decisions.md` | Decision log: one row per decision, one line of why (D1–D49) |
 | `experiments.md` | Experiment log: hypothesis, result, verdict |

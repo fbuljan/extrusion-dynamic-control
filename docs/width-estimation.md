@@ -89,8 +89,10 @@ view, because each camera sees each direction at a different angle.
 | `no_edges` | an edge is too faint (slope under 15 % of the ridge height) or stuck at the search limit |
 | `bad_image` | the JPEG did not decode to the expected size |
 
-The turning rule also decides what curved parts can be measured: on a circle the heading turns 20° over an arc of
-0.35 × radius, so a measurable circle needs a diameter of roughly 150 mm or more.
+Curves are not measured well yet: the axis is a straight line from the nozzle, but on a circle of radius R the bead
+s mm behind the nozzle sits about s²/2R off it. For a 200 mm circle that is 1–2 px across the measured stretch,
+beyond the ±1 px search, so frames read wide or are rejected. Following the recorded path instead of a straight
+line would fix it (not built).
 
 ### The cross-section
 
@@ -220,6 +222,8 @@ gradually: about halfway after ~12 s and fully after 25 s. **0.5.0** re-tunes th
 | Check | Result |
 |---|---|
 | Device vs offline tools on the same frames | same within 0.02 mm |
+| Calliper, 11 bands from 1.40 to 1.70 mm | app +0.04 mm high on average, ±0.12 mm RMS |
+| Calliper, two very wide bands (2.17, 2.40 mm) | app reads 1.76, 1.81: wide beads are seen as wider but under-read |
 | Flow 100 → 80 % | −0.28 mm (printer model predicted −0.15; calliper pending) |
 | Nozzle 220 → 200 °C | −0.07 mm (printer model −0.16) |
 | Nozzle 200 °C + speed 80 % | +0.15 mm back against nozzle 200 °C alone (slower printing lets the cooler hot end keep up) |
@@ -236,6 +240,8 @@ gradually: about halfway after ~12 s and fully after 25 s. **0.5.0** re-tunes th
   ±0.07–0.10 mm until more calliper data arrives.
 - **Delay.** The measured bead was laid ~1 s before the frame, the frame is published ~0.85 s after it was taken, and
   the 25 s window smooths on top. Fine for holding a width, too slow for single corners.
+- **Very wide beads** (above ~1.8 mm) read as wider, but by too little (2.40 mm read as 1.81). Fine for holding
+  1.30–1.50 mm; not for saying how much too wide a bead is.
 - **Two-wall prints.** A neighbouring bead closer than 3.5 px makes frames `ambiguous`; beads merged with a neighbour
   read `too_wide`.
 

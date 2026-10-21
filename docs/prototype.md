@@ -47,7 +47,7 @@ request to LEAM's gateway (schema 0.2.0, ≥ 2 s apart)
 | Width | `width.py`, `geometry.py` | Rejects with a reason: no timestamp, turning (distance since the corner, not time), ambiguous or too-wide ridge. Readings near the blur floor get low confidence. Never raises |
 | Camera model | `camera_model.py` | Hinge model per (camera, heading) group; groups without a fit give nothing (D23, D33) |
 | Estimate | `estimator.py` | Trimmed mean per view over every frame, inverse-variance across views; `sigma_mm` is random noise with at most one frame per second counting (`sigma_bucket_s`: at 2 frames/s neighbours correlate ~0.5), widened by the views' disagreement until their offsets are learned (`harmonize_s`; after that by at most `view_spread_cap`, default 1 = not at all); the calibration error is `model_sigma_mm` |
-| Control | `controller.py`, `control_config.py` | Pure logic, no I/O. Limits, costs and thresholds in config (D30): `deadband_mm` 0.05, `persist_s` 10 / `persist_estimates` 5 / `persist_gap_s` 30, `min_width_mm` 1.30 (the walls alarm, 0.8–2.0). `mode: fallback` is a flow-only proportional controller that needs no printer model |
+| Control | `controller.py`, `control_config.py` | Pure logic, no I/O. Limits, costs and thresholds in config (D30): `deadband_mm` 0.05, `persist_s` 10 / `persist_estimates` 5 / `persist_gap_s` 30, `min_width_mm` 1.30 (the walls alarm, 0.8–2.0), floor rules `floor_min_confidence` 0.45 / `floor_step_factor` 1 / `floor_hold_s` 20 / `floor_release_mm` 0.05. `mode: fallback` is a flow-only proportional controller that needs no printer model |
 | Printer model | `printer_model.py` | numpy forward and inversion of the fitted physics model |
 | State | `control_state.py`, `store.py` | Target persisted in `DATA_DIR/control.json`; Auto memory-only. `DATA_DIR/prototype.db` holds scalars only |
 | Dashboard | `app/static/` | Width / target / Δ with **Hold current width**, Auto switch, "sends" LED, decision line with a *Why*, pinned levers, models LED, width-vs-target chart with the camera ceiling. At the ceiling the width and Δ are shown as lower bounds ("≥") |
@@ -59,8 +59,9 @@ clocks directly; an offset beyond 2 s holds everything with an alarm.
 **When the controller holds** (it says why on the dashboard): no target, a model or view missing, estimate stale
 (> 5 s) or confidence < 0.5, fewer than two views in the window, not extruding, first 6 layers, Auto just switched
 on, gate closed, a lever still settling, the error inside the deadband (0.05 mm, or 2 sigma) or not yet persistent,
-widening wanted while the estimate is at the camera's ceiling, no lever able to move the width (alarm). Costs: flow 1,
-speed 3, nozzle 10. Effect delays: flow and speed 3 s, nozzle 30 s.
+widening wanted while the estimate is at the camera's ceiling, no lever able to move the width (alarm). Two of these give
+way under the floor rules (below): confidence 0.45–0.5 and the deadband. Costs: flow 1, speed 3, nozzle 10. Effect
+delays: flow and speed 3 s, nozzle 30 s.
 
 **Persistent** means off target on one side for 10 s, spanned by at least 5 estimates. Ticks without a usable estimate
 (none, stale or weak, one view only, no readback, not extruding) count as time but not as estimates, until the last
@@ -69,10 +70,23 @@ It also starts over on an estimate on target or on the other side, and on any ot
 someone else's), spacing, a command in flight, another sender's 30 s hold, the first layers, widening latched, a
 printer-model failure, Auto switched on, and the at-ceiling holds (only with a camera model that has a ceiling).
 
-**Walls alarm** (D45): a usable estimate below `min_width_mm` (1.30 mm) puts "alarm: below 1.30 mm (walls may not
+**Walls alarm** (D45): a usable estimate (fresh, confidence ≥ `floor_min_confidence` 0.45, real mm) below
+`min_width_mm` (1.30 mm) puts "alarm: below 1.30 mm (walls may not
 touch)" in front of every reason the controller decides and of the pipeline's not sent, clock and target-stamp
 overrides; an alarm behind it stays one. It is an alarm, not a hold. There is none without a usable estimate (no model,
 refit, control step failed), with a relative camera model, or at a ceiling.
+
+**Floor rules** (D48): below the floor the cautious rules give way. While a usable estimate (confidence ≥
+`floor_min_confidence` 0.45) is under `min_width_mm` and narrower than the target, Auto ignores the noise band and
+accepts that lower confidence; the persistence rule (10 s, 5 estimates), bounds and spacing still apply. The rules stay
+on for `floor_hold_s` (20 s) after the last estimate below the floor while the estimate stays under
+`min_width_mm + floor_release_mm` (1.35 mm), so a reading bouncing around 1.30 doesn't restart the confirmation; a
+settings change or a new target ends them. Decisions made this way say "floor rules: " and carry `floor: true`. Steps
+stay at each lever's `max_step` unless `floor_step_factor` (default 1, at most 2) is raised: 2× answered a clog on noisy
+infill more often (19/20 vs 16/20 on the bench) but ratcheted a steady noisy print wide (mean +0.11 mm, flow to 130 %).
+A bigger step goes out only when widening a bead narrower than wanted; the pipeline checks that again before sending.
+The price at 1×, on 3× frame noise: a steady print drifts +0.07 mm wide on average (D48). `/api/control` `limits`
+reports `pin_s`, `min_layer`, `min_width_mm` and `floor_step_factor` (deploy overrides in the table below).
 
 ## Safety design
 
@@ -81,7 +95,7 @@ refit, control step failed), with a relative camera model, or at a ceiling.
 | A restart resumes sending | Auto is memory-only and starts OFF (D21) |
 | A command goes out by accident | Two keys: the Auto switch and the deployment setting `CONTROL_SEND_ENABLED=1`, default off (D28). The compose file does not set it, so the device app only advises until someone adds it. With Auto on and the second key off the controller runs *dry*: decisions are recorded and shown (`dry: true`), nothing is published |
 | The controller touches the wrong thing | Allowlist: flow, speed override, nozzle temperature. Pressure advance and fans are never sent by the controller |
-| A bad value goes out | Re-checked right before the request: Auto still on, sending enabled, allowed lever, inside bounds, step ≤ the lever's maximum from the fresh readback, ≥ 2 s since our last command, gate open |
+| A bad value goes out | Re-checked right before the request: Auto still on, sending enabled, allowed lever, inside bounds, step ≤ the lever's maximum from the fresh readback (× `floor_step_factor` only for a floor-rules decision that widens a bead narrower than wanted, D48), ≥ 2 s since our last command, gate open |
 | LEAM is not ready | Gate: fresh writer status with `normal_authorized`, fresh telemetry with the gateway in RUN, outputs permitted, command gate open, gateway source fresh |
 | A failed command is repeated | No automatic retry (D26). Rejected, dispatch_unknown or unconfirmed: the lever is held until a readback explains it; two in a row hold everything with a latched alarm. A send that raised after publishing counts as sent |
 | Commands stack up | One lever in flight, ≥ 2 s apart, next judged only on beads deposited after the effect delay (D24, D27) |
@@ -91,7 +105,7 @@ refit, control step failed), with a relative camera model, or at a ceiling.
 | The judgement itself gets stuck | Fewer than 20 estimates in 180 s ("waiting for enough width estimates to judge …"): widening stays held until a narrowing step, a foreign change or a restart. Switching Auto off and on does not clear it |
 | A saved target means something else after a model change | The target is stamped with the camera model it was set under (id, relative flag, typed or Hold). Another model, a stamp from an older version or an unreadable one: hold with "alarm: target set under another camera model; set it again" (D40) |
 | The estimate is wrong | Fitted on a different geometry or extractor setting than the one running: hold all with a "refit" alarm. NaN or missing inputs hold instead of acting |
-| Limits | Flow 70–130 % (±10 per command), speed 60–100 % (±10), nozzle 190–250 °C (±5), pinned levers excluded (D30) |
+| Limits | Flow 70–130 % (±10 per command), speed 60–100 % (±10), nozzle 190–250 °C (±5), pinned levers excluded (D30); below 1.30 mm a widening step may be `floor_step_factor` × that (1 by default, at most 2; D48) |
 | IR gets stored | It is not: memory only; the log holds numbers. The end-to-end runner checks that no image files appear |
 | Local tests reach the real printer | Fake gateway and replay refuse non-loopback hosts; end-to-end runs use a private broker and a clean environment (D37) |
 
@@ -129,6 +143,9 @@ Set `DATA_DIR` as above to keep runs out of the app folder: the default `app/.da
 | `MQTT_WRITER_USER`, `MQTT_WRITER_PASSWORD` | none | Writer account. Anything on the local broker; sending needs both |
 | `MQTT_CONTROLLER_ID` | none | Our id in requests. Must match the fake gateway's `--controller-id` locally |
 | `CONTROL_SEND_ENABLED` | off | `1` is the second key (D28). Anything else, or unset, is off |
+| `CONTROL_PIN_S` | 300 | Seconds Auto leaves an operator's change alone (at least 60). A bad or non-finite value keeps the default |
+| `CONTROL_MIN_LAYER` | 6 | First layer Auto may act on (at least 1) |
+| `CONTROL_FLOOR_STEP_FACTOR` | 1.0 | Step multiple for a floor-rules widening step below 1.30 mm, 1–2 (D48) |
 | `MODELS_DIR` | `app/models` | Folder with `geometry.json`, `camera_model.json`, `printer_model.json`. A missing file is a "no model" state, not a crash |
 | `DATA_DIR` | `app/.data` | `control.json` (target), `prototype.db`, `settings.json`. The image uses `/cfg-data` |
 | `FIRST_LAYER_MM`, `LAYER_MM`, `LINE_WIDTH_MM` | 0.7, 0.5, 1.5 | Slicing of the part being printed: layer counting (first 6 layers hold) and the printer model's context. A bad value is ignored with a warning |
