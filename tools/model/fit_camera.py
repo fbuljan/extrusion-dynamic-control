@@ -1,6 +1,7 @@
 """Camera model fit: what the IR shows (bead width in px) for a real bead (mm, calliper), per camera-heading group.
 
-    .venv/bin/python -m tools.model.fit_camera [--boot N] [--dry-run] [--absolute]
+    .venv/bin/python -m tools.model.fit_camera [--boot N] [--dry-run] [--absolute] [--linear | --exclude-over-asked]
+                                               [--out FILE] [--variants-dir DIR]
 
 Model, on pass-pooled band medians of usable frames (reason ok, settled, readbacks at plan) of the golden prints:
     px = k_g * min(mm, knee_p) + g_T * (nozzle_c - 220) + s_p * (speed_mm_s - 20) + o[g, p],   k_g = kappa * k_nom[g]
@@ -22,8 +23,16 @@ Runtime sigma: leave-one-band-out error below the knee, plus half the inner/oute
 tell passes apart), plus kappa's spread away from the knee; above the knee it ramps up to ABOVE_KNEE_SIGMA_MM.
 Writes app/models/camera_model.json (gitignored: calibration stays local) and both variants to
 data/model/camera_model_{absolute,relative}.json; prints the report tables. The band bootstrap is a diagnostic only.
+--exclude-over-asked: bands whose flow above 100 % asks for more melt (flow x line width x layer height x travel speed)
+than the printer model's capacity at the band's nozzle temperature leave the fit, like defect bands: the extra flow
+can't come out as a steady wider bead, so their calliper is not the bead the IR saw (print 2 flow 140). A cold band
+over capacity stays: its bead narrows to the melt limit and both instruments see that.
+--linear (implies --exclude-over-asked): the runtime profile without a knee, so the file has no ceiling and a flat
+sigma; print 1 keeps its own fitted knee (one wall, not a runtime profile; it only shares kappa and the glow term). A
+speed term set by a single band only fits that band's calliper error, so the runtime then uses 0.
 """
 import argparse
+import functools
 import json
 import math
 import sys
@@ -36,6 +45,7 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(REPO / "app")]
 from server.geometry import GEOMETRY_FILE, MODELS_DIR, Geometry  # noqa: E402
+from server.model_files import MODEL_FILES  # noqa: E402
 from server.pipeline import aim_free, geometry_version, width_config_hash  # noqa: E402
 from server.width import WidthExtractor  # noqa: E402
 
@@ -113,14 +123,41 @@ def band_rows(F, C):
     return R[R.mm.notna()].reset_index(drop=True)
 
 
-def fit_rows(R):
-    """Rows that enter the fit: not defect, not excluded, and their (group, print) has >= MIN_BANDS such bands."""
+def melt_load(F, printer):
+    """Per (print, band): melt demand of the asked flow (mm^3/s) against the printer model's capacity at the band's
+    nozzle temperature; over_asked when flow above 100 % pushes the demand past it."""
+    p = printer["params"]
+    b = F.groupby(["print_id", "band"]).agg(flow=("flow_pct", "median"), v=("speed_mm_s", "median"),
+                                           T=("nozzle_c", "median"), h=("layer_h_mm", "median"),
+                                           lw=("line_w_mm", "median")).reset_index()
+    b["demand_mm3_s"] = b.flow / 100 * b.lw * b.h * b.v
+    b["capacity_mm3_s"] = p["q220_mm3_s"] * np.exp(p["alpha_per_c"] * (b["T"] - float(printer.get("ref_c", 220.0))))
+    b["melt_ratio"] = b.demand_mm3_s / b.capacity_mm3_s
+    b["over_asked"] = (b.flow > 100) & (b.melt_ratio > 1)
+    return b.rename(columns={"print_id": "p", "band": "b"})[
+        ["p", "b", "flow", "demand_mm3_s", "capacity_mm3_s", "melt_ratio", "over_asked"]]
+
+
+def fit_rows(R, over_asked=False):
+    """Rows that enter the fit: not defect, not excluded, (with over_asked) not over-asked, and their (group, print)
+    has >= MIN_BANDS such bands."""
     keep = ~R.defect & ~R.apply(lambda r: (r.g, r.p) in EXCLUDE, axis=1)
+    if over_asked:
+        keep &= ~R.over_asked.fillna(False).astype(bool)
     n = R[keep].groupby(["g", "p"]).b.transform("nunique")
     return R[keep][n >= MIN_BANDS].reset_index(drop=True)
 
 
 # fit -----------------------------------------------------------------------------------------------------------------
+def knee_grids(linear=False):
+    """Knee grid per print; linear: the runtime profile without a knee."""
+    return {**KNEE_GRID, PROFILE: np.array([np.inf])} if linear else KNEE_GRID
+
+
+def coarse(grids):
+    return {p: g[::2] for p, g in grids.items()}
+
+
 def _h(R, knees):
     knee = R.p.map(knees).astype(float).values
     return np.minimum(R.mm.values, knee), (R.mm.values < knee).astype(float)
@@ -201,6 +238,7 @@ def fit(R, grids=None, rounds=3, kappa=None):
     grids = grids or KNEE_GRID
     prints = [p for p in PRINTS if p in set(R.p)]
     knees = {p: (1.5 if p == "print2" else np.inf) for p in prints}
+    knees = {p: m if m in grids[p] else float(grids[p][0]) for p, m in knees.items()}
     best = fit_fixed(R, knees, kappa=kappa)
     for _ in range(rounds):
         before = dict(knees)
@@ -218,15 +256,14 @@ def params(o):
     return o["named"], o["offsets"]
 
 
-def knee_profile(R, best, p):
+def knee_profile(R, best, p, grids=None):
     """nll over print p's knee grid with the other knees at the best fit: the profile-likelihood interval."""
-    return [(float(m), fit_fixed(R, {**best["knees"], p: m}, best["keys"])["nll"]) for m in KNEE_GRID[p]]
+    return [(float(m), fit_fixed(R, {**best["knees"], p: m}, best["keys"])["nll"]) for m in (grids or KNEE_GRID)[p]]
 
 
-def kappa_profile(R, grid=KAPPA_GRID):
+def kappa_profile(R, grid=KAPPA_GRID, grids=None):
     """nll with kappa fixed on a grid (knees, g_T, s, offsets re-fitted): ([(kappa, nll)], 95 % interval)."""
-    coarse = {p: g[::2] for p, g in KNEE_GRID.items()}
-    prof = [(float(k), fit(R, coarse, rounds=2, kappa=k)["nll"]) for k in grid]
+    prof = [(float(k), fit(R, coarse(grids or KNEE_GRID), rounds=2, kappa=k)["nll"]) for k in grid]
     nll0 = min(n for _, n in prof)
     inside = [k for k, n in prof if n <= nll0 + 1.92]
     return prof, (min(inside), max(inside))
@@ -272,17 +309,17 @@ def decide(kappa_ci, levers, force=False):
         "written": "absolute" if passed or force else "relative"}
 
 
-def bootstrap(R, n_boot, seed=1):
+def bootstrap(R, n_boot, seed=1, grids=None):
     """Diagnostic: band ids resampled with replacement within each print; refit (coarser knee grid). Replicates that
     keep < MIN_BELOW_BANDS bands under a knee can't say anything about kappa: counted, not kept."""
     rng = np.random.default_rng(seed)
-    coarse = {p: g[::2] for p, g in KNEE_GRID.items()}
+    grid = coarse(grids or KNEE_GRID)
     by_print = {p: sorted(R[R.p == p].b.unique()) for p in PRINTS if p in set(R.p)}
     out, unidentified = [], 0
     for _ in range(n_boot):
         parts = [R[(R.p == p) & (R.b == b)] for p, bands in by_print.items()
                  for b in rng.choice(bands, len(bands), replace=True)]
-        o = fit(pd.concat(parts, ignore_index=True), coarse, rounds=2)
+        o = fit(pd.concat(parts, ignore_index=True), grid, rounds=2)
         if not o["identified"]:
             unidentified += 1
             continue
@@ -384,11 +421,19 @@ def provenance(geometry_path=None, width_config=None):
             "width_config_hash": width_config_hash(WidthExtractor(Geometry(data), width_config).cfg)}
 
 
-def build_models(best, boot, F, R, loo, scatter):
-    """(absolute, relative) model dicts with the same groups; main() picks one by the identifiability rule."""
+def build_models(best, boot, F, R, loo, scatter, speed_bands_min=1):
+    """(absolute, relative) model dicts with the same groups; main() picks one by the identifiability rule. The runtime
+    speed term is 0 when fewer than speed_bands_min of the profile's bands ran off the reference speed."""
     named, offsets = params(best)
     kappa, gT = named["kappa"][0], named["g_T"][0]
     s = named[f"s:{PROFILE}"][0]
+    prof = R[R.p == PROFILE]
+    speed_bands = int(prof[(prof.v - REF_SPEED).abs() > SPEED_SPREAD_MM_S].b.nunique())
+    s_note = None
+    if speed_bands < speed_bands_min:
+        s_note = (f"runtime speed term 0: {speed_bands} {PROFILE} band(s) off the reference speed can't tell a speed "
+                  f"effect from their calliper error (fitted {s:+.4f} px per mm/s)")
+        s = 0.0
     # robust spread: replicates that keep only a band or two under the knee scatter wide and would swamp a plain SD
     k_rel_sd = (1.4826 * float((boot.kappa - boot.kappa.median()).abs().median()) / kappa if len(boot) > 1
                 else named["kappa"][1] / kappa)
@@ -445,7 +490,8 @@ def build_models(best, boot, F, R, loo, scatter):
                    "s_se": {p: named[f"s:{p}"][1] for p in PRINTS},
                    "knees_mm": {p: (m if math.isfinite(m) else None) for p, m in best["knees"].items()},
                    "tau_px": best["tau"], "bands": int(R.groupby(["p", "b"]).ngroups), "rows": int(len(R)),
-                   "boot_replicates": int(len(boot)), "calliper": scatter, "cam0_baseline_spread_px": spread},
+                   "boot_replicates": int(len(boot)), "calliper": scatter, "cam0_baseline_spread_px": spread,
+                   **({"s_runtime_note": s_note} if s_note else {})},
     }
     a = {**base, "relative": False, "kappa": kappa, "g_T_px_per_c": gT, "s_px_per_mm_s": s, "profiles": absolute,
          "model": "px = k*min(mm, knee_mm) + g_T*(nozzle_c - 220) + s*(speed_mm_s - 20) + offset_px, k = kappa*k_nom",
@@ -479,6 +525,9 @@ def report(R, Rall, F, best, boot, unident, loo, lopo, knee_prof, kappa_ci, choi
         nll0 = min(x[1] for x in prof)
         inside = [x[0] for x in prof if x[1] <= nll0 + 1.92 and math.isfinite(x[0])]
         lin = [x[1] - nll0 for x in prof if not math.isfinite(x[0])]
+        if not inside:
+            P(f"  knee {p}: none (linear)")
+            continue
         P(f"  knee {p}: {m:.2f} mm  profile95 [{min(inside):.2f}, {max(inside):.2f}]"
           + (f"  linear (no knee) +{lin[0]:.2f} nll" if lin else ""))
     if len(boot):
@@ -534,6 +583,15 @@ def report(R, Rall, F, best, boot, unident, loo, lopo, knee_prof, kappa_ci, choi
         mm, lin = invert(best, D)
         for (_, r), a, b in zip(D.iterrows(), mm, lin):
             P(f"  b{r.b} {r.plan:10} {r.g:9} px {r.px:.3f}  pred {a:.3f} (lin {b:.3f})  calliper {r.mm:.3f}")
+    O = Rall[Rall.over_asked.fillna(False).astype(bool) & ~Rall.defect
+             & Rall.apply(lambda r: (r.g, r.p) in offsets, axis=1)] if "over_asked" in Rall else Rall[:0]
+    if len(O) and not R.over_asked.fillna(False).astype(bool).any():
+        P("\nover-asked bands (flow above 100 % past the melt capacity; out of the fit): predicted mm (unclipped) vs "
+          "calliper")
+        mm, lin = invert(best, O)
+        for (_, r), a, b in zip(O.iterrows(), mm, lin):
+            P(f"  {r.p} b{r.b} {r.plan:10} {r.g:9} melt demand {r.melt_ratio:.2f}x capacity  px {r.px:.3f}  pred "
+              f"{a:.3f} (lin {b:.3f})  calliper {r.mm:.3f}")
     P("\ninner minus outer pass, print 2 (median over bands; within-pass frame SD)")
     for g in sorted(Rall[Rall.p == "print2"].g.unique()):
         d = pass_difference(F, g, "print2")
@@ -543,7 +601,9 @@ def report(R, Rall, F, best, boot, unident, loo, lopo, knee_prof, kappa_ci, choi
     P(f"\ncam0:135 baseline bands spread on {PROFILE}: {models[0]['fitted']['cam0_baseline_spread_px']:.3f} px "
       f"(limit {CAM0_MAX_SPREAD_PX})")
     for m in models:
-        P(f"\nruntime profile {m['profile']}, {'RELATIVE (geometric mm)' if m['relative'] else 'absolute'}")
+        P(f"\nruntime profile {m['profile']}, {'RELATIVE (geometric mm)' if m['relative'] else 'absolute'}, speed term "
+          f"{m['s_px_per_mm_s']:+.4f} px per mm/s" + (f" ({m['fitted']['s_runtime_note']})"
+                                                      if m["fitted"].get("s_runtime_note") else ""))
         for g, e in m["profiles"].get(m["profile"], {}).get("groups", {}).items():
             knee = "-" if e["knee_px"] is None else f"{e['knee_mm']:.3f} mm / {e['knee_px']:.3f} px"
             P(f"  {g:9} k {e['k_px_per_mm']:.3f} px/mm  offset {e['offset_px']:+.3f}  knee {knee}  floor "
@@ -563,7 +623,15 @@ def main(argv=None):
     ap.add_argument("--absolute", action="store_true", help="write the absolute model even if the identifiability rule fails")
     ap.add_argument("--width-config", type=json.loads, default={},
                     help="WidthExtractor overrides the widths were made with (default: none)")
+    ap.add_argument("--linear", action="store_true",
+                    help=f"no knee on the runtime profile ({PROFILE}): no ceiling; implies --exclude-over-asked")
+    ap.add_argument("--exclude-over-asked", action="store_true",
+                    help="leave out bands whose flow above 100 %% asks for more melt than the printer model's capacity")
+    ap.add_argument("--printer-model", default=str(MODELS_DIR / MODEL_FILES["printer_model"]),
+                    help="printer model whose melt capacity --exclude-over-asked uses (default: the installed one)")
+    ap.add_argument("--variants-dir", help="where both variants are written (default: --data)")
     a = ap.parse_args(argv)
+    over_asked = a.exclude_over_asked or a.linear
     data = Path(a.data)
     frames = pd.read_parquet(data / "frames.parquet")
     prov = provenance(width_config=a.width_config)
@@ -578,18 +646,41 @@ def main(argv=None):
     F = usable_frames(frames)
     C = calliper(pd.read_parquet(data / "bands.parquet"))
     Rall = band_rows(F, C)
-    R = fit_rows(Rall)
-    best = fit(R)
-    _, kappa_ci = kappa_profile(R)
-    write_absolute, choice = decide(kappa_ci, lever_check(R, best), a.absolute)
-    boot, unident = bootstrap(R, a.boot)
-    loo = leave_one_band_out(R, Rall)
+    melt, printer = None, None
+    if over_asked:
+        printer = json.loads(Path(a.printer_model).read_text())
+        melt = melt_load(F, printer)
+        Rall = Rall.merge(melt[["p", "b", "melt_ratio", "over_asked"]], on=["p", "b"], how="left")
+    R = fit_rows(Rall, over_asked)
+    grids = knee_grids(a.linear)
+    fit_fn = functools.partial(fit, grids=grids)
+    best = fit_fn(R)
+    _, kappa_ci = kappa_profile(R, grids=grids)
+    write_absolute, choice = decide(kappa_ci, lever_check(R, best, fit_fn), a.absolute)
+    boot, unident = bootstrap(R, a.boot, grids=grids)
+    loo = leave_one_band_out(R, Rall, fit_fn)
     lopo = leave_one_print_out(R, best)
-    knee_prof = {p: knee_profile(R, best, p) for p in best["knees"]}
-    absolute, relative = build_models(best, boot, F, R, loo, calliper_scatter(C))
+    knee_prof = {p: knee_profile(R, best, p, grids) for p in best["knees"]}
+    absolute, relative = build_models(best, boot, F, R, loo, calliper_scatter(C), speed_bands_min=2 if a.linear else 1)
     for m in (absolute, relative):
-        m.update(prov, choice=choice)
+        m.update(prov, choice=choice, fit_mode="linear" if a.linear else "hinge")
+        if a.linear and not m["relative"]:
+            m["model"] = (f"px = k*mm + g_T*(nozzle_c - 220) + s*(speed_mm_s - 20) + offset_px, k = kappa*k_nom; "
+                          f"{PROFILE} without a knee (knee_mm null: no ceiling)")
+            m["sigma_note"] = ("sigma_mm: band-level model error (leave-one-band-out over the fitted bands) and half "
+                               "the inner/outer pass difference, flat in mm. The calliper's absolute level (print 2, "
+                               "about +-0.1 mm) is not in it")
+        if melt is not None:
+            out_ = melt[melt.over_asked]
+            m["over_asked"] = {
+                "rule": "out of the fit: flow above 100 % and melt demand (flow x line width x layer height x travel "
+                        "speed) above the printer model's capacity q220*exp(alpha*(T-220)) at the band's nozzle C",
+                "printer_model": printer.get("version"),
+                "excluded": {f"{r.p} b{r.b}": round(float(r.melt_ratio), 3) for r in out_.itertuples()}}
     model = absolute if write_absolute else relative
+    if melt is not None:
+        print("melt demand vs the printer model's capacity per band (over_asked = out of the fit):")
+        print(melt.round(3).to_string(index=False) + "\n")
     print(report(R, Rall, F, best, boot, unident, loo, lopo, knee_prof, kappa_ci, choice, (absolute, relative)))
     print(f"\nchoice: {choice['written']} (rule {'passed' if choice['passed'] else 'failed'}"
           f"{', forced by --absolute' if choice['forced'] else ''}); kappa profile95 {choice['kappa_profile95']}, "
@@ -599,9 +690,11 @@ def main(argv=None):
         out = Path(a.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(model, indent=1, default=float))
+        variants = Path(a.variants_dir) if a.variants_dir else data
+        variants.mkdir(parents=True, exist_ok=True)
         for name, m in (("absolute", absolute), ("relative", relative)):
-            (data / f"camera_model_{name}.json").write_text(json.dumps(m, indent=1, default=float))
-        print(f"wrote {out} ({choice['written']}); both variants in {data}")
+            (variants / f"camera_model_{name}.json").write_text(json.dumps(m, indent=1, default=float))
+        print(f"wrote {out} ({choice['written']}); both variants in {variants}")
 
 
 if __name__ == "__main__":

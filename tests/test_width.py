@@ -657,9 +657,15 @@ G1 = CAPTURES / "golden-20261020-1736"
 @pytest.mark.skipif(not (G1 / "ir.jsonl").exists() or not (MODELS_DIR / "geometry.json").exists(),
                     reason="needs the first golden print recording and the local geometry model")
 def test_recorded_golden_print_regression():
-    from tools.model.width_check import run_capture
+    from tools.model.width_check import run_capture, write_refusals
 
-    W, _ = run_capture(G1.name, WidthExtractor(Geometry.load()), skip=1300, limit=300)
+    geo = Geometry.load()
+    if write_refusals([G1.name], geo.model):  # a capture is measured at its own aim (D38); the pins are 0.2's
+        pinned = MODELS_DIR / "geometry-0.2.json"
+        if not pinned.exists():
+            pytest.skip("the installed geometry is re-aimed after the golden print and geometry-0.2.json is missing")
+        geo = Geometry.load(pinned)
+    W, _ = run_capture(G1.name, WidthExtractor(geo), skip=1300, limit=300)
     ok = W[W.reason == "ok"]
     assert len(ok) > 0.3 * len(W)
     med = ok.groupby("group").width_px.median()
