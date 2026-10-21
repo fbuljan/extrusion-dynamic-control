@@ -90,6 +90,9 @@ def run_capture(cap, extractor, limit=None, skip=0):
             break
     flush(float("inf"))
     W = pd.DataFrame(rows)
+    for col in ("at_search_limit", "offset_px", "edge_l", "edge_r"):  # absent when no frame reached the search
+        if col not in W:
+            W[col] = float("nan")
     W["at_search_limit"] = W.at_search_limit.astype(float)  # NaN where the frame never got that far
     W["lateral_px"] = W.offset_px + 0.5 * (W.edge_l + W.edge_r)  # ridge centre from its edges: sub-bin
     W["lateral_mm"] = W.lateral_px * W.mm_per_px
