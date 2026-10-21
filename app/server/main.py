@@ -252,10 +252,25 @@ def target_stamp(by):
         return None
 
 
+def note_changes(before, after):
+    """Operator changes for the Test bench trace."""
+    fn = getattr(getattr(app.state, "pipeline", None), "note_event", None)
+    if not callable(fn):
+        return
+    for kind, keys in (("auto", ("auto",)), ("target", ("target_mm",)), ("band", ("band_below_mm", "band_above_mm")),
+                       ("levers", ("levers",))):
+        if any(before.get(k) != after.get(k) for k in keys):
+            try:
+                fn(kind, **{k: after.get(k) for k in keys})
+            except Exception:  # noqa: BLE001 - the change is applied; only its trace entry is lost
+                log.warning("could not note a control change", exc_info=True)
+
+
 def apply_control(body):
     try:
         if not isinstance(body, dict):
-            raise ValueError("expected a JSON object with target_mm, auto and/or hold_current")
+            raise ValueError("expected a JSON object with target_mm, auto, hold_current, band_below_mm, band_above_mm "
+                             "and/or levers")
         body = dict(body)
         hold = body.pop("hold_current", False)
         if not isinstance(hold, bool):
@@ -267,7 +282,8 @@ def apply_control(body):
         elif body.get("target_mm") is not None:
             check_typed_target(body["target_mm"])
         stamp = target_stamp("hold" if hold else "typed") if body.get("target_mm") is not None else None
-        control.update(body, stamp=stamp)
+        before = control.public()
+        note_changes(before, control.update(body, stamp=stamp))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except OSError as e:
@@ -286,6 +302,18 @@ def get_pipeline():
     status = pipeline_value("status", None)
     models = {name: s["version"] if s["present"] else None for name, s in model_files.status().items()}
     return {"server_ms": now_ms(), "running": isinstance(status, dict), **(status or {}), "models": models}
+
+
+@app.get("/api/trace")
+def get_trace(since_ms: int | None = None):
+    """The control loop's last 15 minutes, one row a second, and the operator's events (Test bench page)."""
+    fn = getattr(getattr(app.state, "pipeline", None), "trace", None)
+    try:
+        trace = finite(jsonable_encoder(fn(since_ms), custom_encoder=NUMPY_ENCODERS)) if callable(fn) else None
+    except Exception:  # noqa: BLE001 - like any pipeline field: reported empty, never an error page
+        log.warning("pipeline.trace failed", exc_info=True)
+        trace = None
+    return {"server_ms": now_ms(), "running": isinstance(trace, dict), **(trace or {"rows": [], "events": []})}
 
 
 @app.post("/api/control")

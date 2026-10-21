@@ -1,4 +1,5 @@
-"""Operator-set control state: target width (persisted) and the Auto switch (memory only: every start is advise-only).
+"""Operator-set control state: target width and its allowed band (persisted), the Auto switch and per-lever tuning
+(memory only: every start is advise-only, with the configured levers and steps).
 
 The target is persisted with a stamp of the camera model it was set under: the file outlives app updates, and a
 width typed under one camera model means something else under another, so the pipeline only acts on a matching stamp.
@@ -10,9 +11,13 @@ import os
 import threading
 from pathlib import Path
 
+from . import control_config
+
 log = logging.getLogger(__name__)
 TARGET_MM_RANGE = (0.3, 5.0)
-FIELDS = ("target_mm", "auto")
+BAND_MM_RANGE = (0.0, 1.0)
+FIELDS = ("target_mm", "auto", "band_below_mm", "band_above_mm", "levers")
+PERSISTED = ("target_mm", "band_below_mm", "band_above_mm")
 
 
 def send_enabled():
@@ -37,7 +42,47 @@ def _check_auto(value):
     return value
 
 
-CHECKS = {"target_mm": _check_target, "auto": _check_auto}
+def _check_band(name):
+    def check(value):
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{name} must be a number in mm, or null for the default")
+        low, high = BAND_MM_RANGE
+        if not low <= value <= high:
+            raise ValueError(f"{name} must be within {low}-{high} mm")
+        return float(value)
+    return check
+
+
+def default_levers():
+    return {op: {"enabled": True, "max_step": None} for op in control_config.LEVERS}
+
+
+def _check_levers(value, current):
+    """Merged per lever into the current tuning. A step can only be smaller than the configured one (None: that one)."""
+    if not isinstance(value, dict):
+        raise ValueError("levers must be an object of lever settings")
+    merged = {op: dict(spec) for op, spec in current.items()}
+    for op, spec in value.items():
+        if op not in control_config.LEVERS:
+            raise ValueError(f"{op!r} is not a controller lever (allowed: {', '.join(control_config.LEVERS)})")
+        if not isinstance(spec, dict) or not set(spec) <= {"enabled", "max_step"}:
+            raise ValueError(f"{op} takes enabled and/or max_step")
+        if "enabled" in spec and not isinstance(spec["enabled"], bool):
+            raise ValueError(f"{op} enabled must be true or false")
+        step, top = spec.get("max_step"), control_config.DEFAULTS["levers"][op]["max_step"]
+        if step is not None and (isinstance(step, bool) or not isinstance(step, (int, float)) or
+                                 not math.isfinite(step) or step != int(step) or not 1 <= step <= top):
+            raise ValueError(f"{op} max_step must be a whole number from 1 to {top:g}, or null for {top:g}")
+        merged[op].update({k: (int(v) if k == "max_step" and v is not None else v) for k, v in spec.items()})
+    if not any(spec["enabled"] for spec in merged.values()):
+        raise ValueError("keep at least one lever on for Auto")
+    return merged
+
+
+CHECKS = {"target_mm": _check_target, "auto": _check_auto, "band_below_mm": _check_band("band_below_mm"),
+          "band_above_mm": _check_band("band_above_mm")}
 
 
 def _check_stamp(value):
@@ -54,7 +99,8 @@ class ControlState:
     def __init__(self, path):
         self.path = Path(path)
         self.lock = threading.Lock()
-        self._values = {"target_mm": None, "auto": False}
+        self._values = {"target_mm": None, "auto": False, "band_below_mm": None, "band_above_mm": None,
+                        "levers": default_levers()}
         self._stamp = None
         self.load_error = None
         self.persist_error = None
@@ -74,31 +120,36 @@ class ControlState:
 
     def public(self):
         with self.lock:
-            return dict(self._values)
+            return self._copy()
 
     def snapshot(self):
-        """Target, Auto and the target's stamp, read together."""
+        """Target, band, Auto, tuning and the target's stamp, read together."""
         with self.lock:
-            return {**self._values, "target_stamp": self._stamp}
+            return {**self._copy(), "target_stamp": self._stamp}
+
+    def _copy(self):
+        return {**self._values, "levers": {op: dict(spec) for op, spec in self._values["levers"].items()}}
 
     def update(self, new, stamp=None):
         """Validate all fields, apply in memory, persist a changed target or stamp (a failing disk only sets
         persist_error). `stamp` comes from the app, never from a request body; it goes with a target being set."""
         if not isinstance(new, dict):
-            raise ValueError("expected an object with target_mm and/or auto")
+            raise ValueError(f"expected an object with {', '.join(FIELDS)}")
         unknown = sorted(set(new) - set(FIELDS))
         if unknown:
-            raise ValueError(f"unknown field {unknown[0]!r}; allowed: target_mm, auto")
-        checked = {k: CHECKS[k](v) for k, v in new.items()}
+            raise ValueError(f"unknown field {unknown[0]!r}; allowed: {', '.join(FIELDS)}")
+        checked = {k: CHECKS[k](v) for k, v in new.items() if k != "levers"}
         with self.lock:
+            if "levers" in new:
+                checked["levers"] = _check_levers(new["levers"], self._values["levers"])
             values, new_stamp = {**self._values, **checked}, self._stamp
             if "target_mm" in checked:
                 new_stamp = _check_stamp(stamp) if checked["target_mm"] is not None else None
-            changed = values["target_mm"] != self._values["target_mm"] or new_stamp != self._stamp
+            changed = any(values[k] != self._values[k] for k in PERSISTED) or new_stamp != self._stamp
             self._values, self._stamp = values, new_stamp
             if changed:
                 self._persist()
-            return dict(self._values)
+            return self._copy()
 
     def _load(self):
         try:
@@ -107,9 +158,10 @@ class ControlState:
             data = json.loads(self.path.read_text())
             if not isinstance(data, dict):
                 raise ValueError("not a JSON object")
-            if "target_mm" in data:
-                self._values = {**self._values, "target_mm": _check_target(data["target_mm"])}
-                self._stamp = _check_stamp(data.get("target_stamp")) if self._values["target_mm"] is not None else None
+            loaded = {key: CHECKS[key](data[key]) for key in PERSISTED if key in data}  # all or nothing
+            self._values = {**self._values, **loaded}
+            if "target_mm" in loaded:
+                self._stamp = _check_stamp(data.get("target_stamp")) if loaded["target_mm"] is not None else None
         except Exception as e:  # noqa: BLE001 - any unreadable file (even RecursionError) must leave the app starting
             self.load_error = f"{type(e).__name__}: {e}"
             log.warning("ignoring %s: %s", self.path, self.load_error)
@@ -125,7 +177,7 @@ class ControlState:
     def _write(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
-        data = {"target_mm": self._values["target_mm"]}
+        data = {key: self._values[key] for key in PERSISTED if key == "target_mm" or self._values[key] is not None}
         if self._stamp:
             data["target_stamp"] = self._stamp
         with open(tmp, "w") as f:

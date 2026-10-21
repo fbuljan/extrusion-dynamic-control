@@ -575,12 +575,18 @@ class RogueController:
     def estimate_since(self):
         return None
 
-    def step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto):
+    def step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto, band=None):
         return Decision(now_ms, "auto" if auto else "advise", self.action, "rogue", self.error_mm, None, [], self.hold,
                         self.floor)
 
     def walls_alarm(self, estimate):
         return self.real.walls_alarm(estimate)
+
+    def tune(self, levers):
+        self.real.tune(levers)
+
+    def band_mm(self, band):
+        return self.real.band_mm(band)
 
     def note_sent(self, *args):
         self.sent.append(args)
@@ -935,11 +941,57 @@ def test_clearing_the_target_drops_its_stamp_and_auto_alone_keeps_it(tmp_path):
     stamp = {"camera_model": "cam-A", "relative": False, "by": "typed"}
     state.update({"target_mm": 1.3}, stamp=stamp)
     state.update({"auto": True}, stamp={"camera_model": "other", "relative": False, "by": "typed"})
-    assert state.snapshot() == {"target_mm": 1.3, "auto": True, "target_stamp": stamp}
+    assert {k: state.snapshot()[k] for k in ("target_mm", "auto", "target_stamp")} == \
+        {"target_mm": 1.3, "auto": True, "target_stamp": stamp}
     state.update({"target_mm": None}, stamp=stamp)
     assert state.target_stamp is None and json.loads((tmp_path / "control.json").read_text()) == {"target_mm": None}
     with pytest.raises(ValueError):
         state.update({"target_mm": 1.3, "target_stamp": stamp})
+
+
+@pytest.mark.parametrize("levers, value, refusal", [
+    ({"flow_percent": {"enabled": False}}, 95, "flow_percent is switched off for Auto"),
+    ({"flow_percent": {"max_step": 3}}, 95, "flow_percent 95 is more than 3 from the readback 100"),
+    ({"flow_percent": {"max_step": 3}}, 97, None),
+    ({"flow_percent": {"max_step": 3}}, "floor 106", None),
+    ({"flow_percent": {"max_step": 3}}, "floor 107", "flow_percent 107 is more than 6 from the readback 100"),
+    ({"flow_percent": {"max_step": 3}}, "floor 94", "flow_percent 94 is more than 3 from the readback 100"),
+])
+def test_the_last_check_takes_the_operators_tuning_from_the_control_state(sim, levers, value, refusal):
+    floor = isinstance(value, str)  # a floor-rules widening step may be floor_step_factor x the tuned step, no more
+    value = int(value.split()[1]) if floor else value
+    s = sim(auto=True, config={"floor_step_factor": 2.0})
+    s.run(3)
+    s.control.update({"levers": levers})
+    s.pipeline.controller = RogueController(s.pipeline.controller, {"operation": "flow_percent", "value": value},
+                                            floor=floor, error_mm=0.2 if floor else None)
+    d = s.pipeline.tick()
+    assert (len(s.bridge.sent) == 1) is (refusal is None)
+    if refusal:
+        assert d["reason"] == f"not sent: {refusal}" and d["sent"] is False
+
+
+def test_every_step_leaves_a_trace_row_and_manual_sends_are_events(sim):
+    s = sim(auto=True, target=1.35)
+    s.control.update({"band_below_mm": 0.1, "band_above_mm": None})
+    s.run(5)
+    rows = s.pipeline.trace()["rows"]
+    assert len(rows) == 5
+    last = rows[-1]
+    assert (last["target_mm"], last["band_below_mm"], last["band_above_mm"], last["auto"]) == (1.35, 0.1, 0.05, True)
+    assert (last["flow"], last["speed"], last["nozzle_target"]) == (100, 100, 220) and last["reason"]
+    assert isinstance(last["mm"], float) and last["noise_mm"] == pytest.approx(2 * last["sigma_mm"])
+    assert [r["t_ms"] for r in s.pipeline.trace(rows[-2]["t_ms"])["rows"]] == [last["t_ms"]]
+    s.pipeline.note_manual_send({"correction": {"operation": "flow_percent", "value": 90}}, {"ok": True})
+    s.pipeline.note_manual_send({"correction": {"operation": "flow_percent", "value": 80}}, {"ok": False})
+    assert [(e["kind"], e["operation"], e["value"]) for e in s.pipeline.trace()["events"]] == \
+        [("manual", "flow_percent", 90)]
+    json.dumps(s.pipeline.trace(), allow_nan=False)
+
+
+def test_the_trace_keeps_fifteen_minutes(sim):
+    s = sim(auto=False)
+    assert s.pipeline._trace.maxlen == 900
 
 
 def test_ceiling_and_relative_come_from_the_camera_model(sim):

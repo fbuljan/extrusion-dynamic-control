@@ -7,7 +7,9 @@ image-like is stored. Clocks: frame and motion times are LEAM's; the controller,
 use ours. Sample times cross over with offset = min over 30 s of (telemetry receive time - motion source time); without
 telemetry the deposit time is left out, so effect gating falls back to receive time.
 A request is sent only when Auto is on, CONTROL_SEND_ENABLED=1, the decision is a non-hold action on a controller lever
-and the gate is open, all checked again right before the request is built.
+the operator left on, within its step, and the gate is open, all checked again right before the request is built.
+Every step also leaves a scalar row in a 15-minute trace (width, target and band, Auto, setpoints, decision) for the
+Test bench page, next to the operator's events (manual sends, Auto on/off, target, band and lever changes).
 """
 import base64
 import dataclasses
@@ -44,10 +46,12 @@ DEFAULTS = {
     "layer_mm": 0.5,
     "line_width_mm": 1.5,
     "max_clock_offset_ms": 2000,  # beyond this our clock or LEAM's is wrong: hold and say so
+    "trace_s": 900,
 }
 ENV_SETTINGS = {"FIRST_LAYER_MM": "first_layer_mm", "LAYER_MM": "layer_mm", "LINE_WIDTH_MM": "line_width_mm"}
 TARGET_ALARM = "alarm: target set under another camera model; set it again"
 STATS = ("frames_done", "frames_dropped", "sent", "send_refused", "send_failed", "send_uncertain", "foreign_results")
+TRACE_REASON_CHARS = 200
 
 
 def is_number(value):
@@ -182,7 +186,7 @@ class Pipeline:
         self.extraction = "running" if self.extractor else "no geometry"
         self.camera_model = camera_model
         self.provenance, self.mismatch = self._provenance(geometry)
-        self._limits = control_config.limits(self.controller.cfg) if not (self.missing or self.mismatch) else {}
+        self._can_act = not (self.missing or self.mismatch)
         self._pinned = {}
         self.offset_ms = None
         self.stats = Counter()
@@ -205,6 +209,9 @@ class Pipeline:
         self._last_decision = None
         self._stored = (None, -math.inf)
         self._logged_offset = None
+        self._trace_lock = threading.Lock()
+        self._trace = deque(maxlen=int(self.cfg["trace_s"] / self.cfg["control_period_s"]))
+        self._events = deque(maxlen=300)
         self._stop = threading.Event()
         self._threads = []
 
@@ -260,8 +267,22 @@ class Pipeline:
         return {op: dict(p) for op, p in self._pinned.items() if p["until_ms"] > now}
 
     def limits(self):
-        """What the controller may do; nothing while a model it needs is missing."""
-        return self._limits
+        """What the controller may do (with the operator's tuning); nothing while a model it needs is missing."""
+        return self.controller.limits() if self._can_act else {}
+
+    def trace(self, since_ms=None):
+        """Trace rows and operator events newer than since_ms (all kept without), oldest first."""
+        with self._trace_lock:
+            rows, events = list(self._trace), list(self._events)
+        if since_ms is not None:
+            rows = [r for r in rows if r["t_ms"] > since_ms]
+            events = [e for e in events if e["t_ms"] > since_ms]
+        return {"rows": rows, "events": events}
+
+    def note_event(self, kind, **fields):
+        """An operator change for the trace: "auto", "target", "band", "levers" or "manual" (a send by hand)."""
+        with self._trace_lock:
+            self._events.append(jsonable({"t_ms": self.clock(), "kind": kind, **fields}))
 
     def ceiling_mm(self):
         """Widest bead the camera can tell apart, or None."""
@@ -427,8 +448,10 @@ class Pipeline:
         if not (isinstance(result, dict) and result.get("ok") and isinstance(correction, dict)):
             return
         op, value = correction.get("operation"), correction.get("value")
-        if isinstance(op, str) and is_number(value) and self.control.public()["auto"] is True:
-            self._inbox.append(("manual", op, value, self.clock()))
+        if isinstance(op, str) and is_number(value):
+            if self.control.public()["auto"] is True:
+                self._inbox.append(("manual", op, value, self.clock()))
+            self.note_event("manual", operation=op, value=value)
 
     # width (worker thread) ------------------------------------------------------------------------------------------
     def process_pending(self):
@@ -523,9 +546,11 @@ class Pipeline:
         snapshot = getattr(self.control, "snapshot", None)
         view = snapshot() if callable(snapshot) else self.control.public()
         auto = view["auto"] is True
+        band = (view.get("band_below_mm"), view.get("band_above_mm"))
         try:
             self._drain()
-            out = self._step(now, view["target_mm"], auto, view.get("target_stamp"))
+            self.controller.tune(view.get("levers"))
+            out = self._step(now, view["target_mm"], auto, view.get("target_stamp"), band)
             self._pinned = self.controller.pinned(now)
         except Exception as e:  # noqa: BLE001 - nothing is sent on a failed step, and the operator sees why
             self._fail("control step", e)
@@ -533,7 +558,35 @@ class Pipeline:
                               f"alarm: control step failed ({type(e).__name__})", None, None, [], True).to_dict(),
                    "dry": auto and not send_enabled(), "sent": None}
         self._record(jsonable(out), now)
+        try:
+            self._trace_step(now, view, band, out)
+        except Exception as e:  # noqa: BLE001 - the trace is for display; it must never stop the loop
+            self._fail("trace", e)
         return out
+
+    def _trace_step(self, now, view, band, out):
+        with self._est_lock:
+            est = self.estimator.estimate(now)
+        setpoints, measured, context = self._inputs(now)
+        below, above = self.controller.band_mm(band)
+        sigma = est["sigma_mm"] if est else None
+        error, target = out.get("error_mm"), view["target_mm"]
+        row = {"t_ms": now, "mm": est["mm"] if est else None, "sigma_mm": sigma,
+               # what the controller judged: only beads laid since the last change, so it can differ from mm
+               "judged_mm": target - error if is_number(error) and is_number(target) else None,
+               "confidence": est["confidence"] if est else None, "n": est["n"] if est else None,
+               "at_ceiling": bool(est and est.get("at_ceiling")),
+               "noise_mm": self.controller.cfg["sigma_factor"] * sigma if is_number(sigma) else None,
+               "target_mm": target, "band_below_mm": below, "band_above_mm": above,
+               "auto": view["auto"] is True, "gate_open": self.gate_open(now),
+               "flow": setpoints.get("flow_percent"), "speed": setpoints.get("speed_override_percent"),
+               "nozzle_target": setpoints.get("nozzle_temperature_c"), "nozzle_c": measured.get("nozzle_c"),
+               "extruding": measured.get("extruding"), "layer": context.get("layer"),
+               "action": out.get("action"), "sent": out.get("sent"), "hold": out.get("hold"),
+               "floor": out.get("floor"), "dry": out.get("dry"), "error_mm": out.get("error_mm"),
+               "predicted_mm": out.get("predicted_mm"), "reason": (out.get("reason") or "")[:TRACE_REASON_CHARS]}
+        with self._trace_lock:
+            self._trace.append(jsonable(row))
 
     def _drain(self):
         while self._inbox:
@@ -544,7 +597,7 @@ class Pipeline:
                 op, value, at = args
                 self.controller.note_external(op, value, at)
 
-    def _step(self, now, target, auto, stamp=None):
+    def _step(self, now, target, auto, stamp=None, band=None):
         mode = "auto" if auto else "advise"
         problem = self.target_problem(target, stamp)
         walls = None  # the overrides below keep the bead's own alarm in front
@@ -558,7 +611,7 @@ class Pipeline:
                 est = self.estimator.estimate(now, since_ms=self.controller.estimate_since())
             setpoints, measured, context = self._inputs(now)
             d = self.controller.step(now, est, None if problem else target, setpoints, measured, context,
-                                     self.gate_open(now), auto)
+                                     self.gate_open(now), auto, band)
             walls = self.controller.walls_alarm(est)
             if problem:
                 d = Decision(now, mode, None, lead_with(walls, problem), None, None, [], True)
@@ -606,13 +659,17 @@ class Pipeline:
             return "sending is disabled"
         if decision.hold or lever is None or not is_number(value):
             return f"not an allowed action: {action}"
+        tuned = (self.control.public().get("levers") or {}).get(op) or {}  # the operator's, not the controller's word
+        if tuned.get("enabled") is False:
+            return f"{op} is switched off for Auto"
         lo, hi = lever["bounds"]
         if not lo <= value <= hi:
             return f"{op} {value} outside {lo}-{hi}"
         current = self._inputs(now)[0].get(op)
         if not is_number(current):
             return f"no fresh readback for {op}"
-        step = lever["max_step"] * (self.controller.cfg["floor_step_factor"] if _floor_widening(decision, current) else 1)
+        step = min(lever["max_step"], tuned["max_step"]) if is_number(tuned.get("max_step")) else lever["max_step"]
+        step *= self.controller.cfg["floor_step_factor"] if _floor_widening(decision, current) else 1
         if abs(value - current) > step + 1e-9:
             return f"{op} {value} is more than {step:g} from the readback {current:g}"
         if self._last_sent_ms is not None and now - self._last_sent_ms < self.controller.cfg["min_spacing_ms"]:

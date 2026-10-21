@@ -95,7 +95,7 @@ reports `pin_s`, `min_layer`, `min_width_mm` and `floor_step_factor` (deploy ove
 | A restart resumes sending | Auto is memory-only and starts OFF (D21) |
 | A command goes out by accident | Two keys: the Auto switch and the deployment setting `CONTROL_SEND_ENABLED=1`, default off (D28). The compose file does not set it, so the device app only advises until someone adds it. With Auto on and the second key off the controller runs *dry*: decisions are recorded and shown (`dry: true`), nothing is published |
 | The controller touches the wrong thing | Allowlist: flow, speed override, nozzle temperature. Pressure advance and fans are never sent by the controller |
-| A bad value goes out | Re-checked right before the request: Auto still on, sending enabled, allowed lever, inside bounds, step ≤ the lever's maximum from the fresh readback (× `floor_step_factor` only for a floor-rules decision that widens a bead narrower than wanted, D48), ≥ 2 s since our last command, gate open |
+| A bad value goes out | Re-checked right before the request: Auto still on, sending enabled, allowed lever the operator left on, inside bounds, step ≤ the lever's maximum (or the operator's smaller one, read from the control state) from the fresh readback (× `floor_step_factor` only for a floor-rules decision that widens a bead narrower than wanted, D48), ≥ 2 s since our last command, gate open |
 | LEAM is not ready | Gate: fresh writer status with `normal_authorized`, fresh telemetry with the gateway in RUN, outputs permitted, command gate open, gateway source fresh |
 | A failed command is repeated | No automatic retry (D26). Rejected, dispatch_unknown or unconfirmed: the lever is held until a readback explains it; two in a row hold everything with a latched alarm. A send that raised after publishing counts as sent |
 | Commands stack up | One lever in flight, ≥ 2 s apart, next judged only on beads deposited after the effect delay (D24, D27) |
@@ -105,7 +105,8 @@ reports `pin_s`, `min_layer`, `min_width_mm` and `floor_step_factor` (deploy ove
 | The judgement itself gets stuck | Fewer than 20 estimates in 180 s ("waiting for enough width estimates to judge …"): widening stays held until a narrowing step, a foreign change or a restart. Switching Auto off and on does not clear it |
 | A saved target means something else after a model change | The target is stamped with the camera model it was set under (id, relative flag, typed or Hold). Another model, a stamp from an older version or an unreadable one: hold with "alarm: target set under another camera model; set it again" (D40) |
 | The estimate is wrong | Fitted on a different geometry or extractor setting than the one running: hold all with a "refit" alarm. NaN or missing inputs hold instead of acting |
-| Limits | Flow 70–130 % (±10 per command), speed 60–100 % (±10), nozzle 190–250 °C (±5), pinned levers excluded (D30); below 1.30 mm a widening step may be `floor_step_factor` × that (1 by default, at most 2; D48) |
+| Limits | Flow 70–130 % (±10 per command), speed 60–100 % (±10), nozzle 190–250 °C (±5), pinned levers excluded (D30); below 1.30 mm a widening step may be `floor_step_factor` × that (1 by default, at most 2; D48). The Test bench can only make steps smaller or switch levers off, never widen a limit (D50) |
+| An operator zone tighter than the noise | Auto still holds within 2 × sigma, and the Test bench says when the noise is wider than the zone (D50) |
 | IR gets stored | It is not: memory only; the log holds numbers. The end-to-end runner checks that no image files appear |
 | Local tests reach the real printer | Fake gateway and replay refuse non-loopback hosts; end-to-end runs use a private broker and a clean environment (D37) |
 
@@ -209,13 +210,25 @@ Recordings with IR frames stay under `data/captures/` and outputs under `data/mo
 | Endpoint | What |
 |---|---|
 | `GET /api/control` | `target_mm`, `auto`, `send_enabled`, `estimate`, `last_decision`, `pinned`, `models`, `limits`, `ceiling_mm`, `relative`, `server_ms`, `persist_error`, `load_error` |
-| `POST /api/control` | `{"target_mm": number or null, "auto": bool, "hold_current": true}`, any subset; returns the same view. 400 with `{"error"}` for a target outside 0.3–5.0 mm or above the camera ceiling, `target_mm` together with `hold_current`, or `hold_current` without a fresh estimate of confidence ≥ 0.5. `send_enabled` is read-only: it comes from the environment |
+| `POST /api/control` | `{"target_mm": number or null, "auto": bool, "hold_current": true, "band_below_mm": 0–1 or null, "band_above_mm": 0–1 or null, "levers": {op: {"enabled": bool, "max_step": whole number from 1 to the configured step, or null}}}`, any subset; levers merge per lever; returns the same view. 400 with `{"error"}` for a target outside 0.3–5.0 mm or above the camera ceiling, `target_mm` together with `hold_current`, or `hold_current` without a fresh estimate of confidence ≥ 0.5. `send_enabled` is read-only: it comes from the environment |
+| `GET /api/trace?since_ms=` | The Test bench's history: one scalar row per control step for 15 min (`mm`, `sigma_mm`, `noise_mm`, `judged_mm`, `confidence`, `target_mm`, `band_below_mm`/`band_above_mm` as applied, `auto`, `dry`, `gate_open`, `flow`, `speed`, `nozzle_target`, `nozzle_c`, `layer`, `action`, `sent`, `hold`, `floor`, `reason`) and the operator's `events` (`manual` sends, `auto`, `target`, `band`, `levers`), newer than `since_ms` |
 | `GET /api/pipeline` | Health of the width loop: `running`, `extraction`, `missing` models, `clock_offset_ms`, `clock_alarm`, `gate_open`, `camera_provenance`, counters (`frames_done`, `frames_dropped`, `sent`, `send_refused`, `send_failed`, `send_uncertain`, `foreign_results`), errors per stage, model versions |
 | WebSocket `/ws` | New message types `width` (the estimate, ≤ 2 Hz) and `decision` (every control step, 1 Hz) next to the existing ones |
 
 An estimate carries `mm`, `sigma_mm`, `model_sigma_mm`, `n`, `age_ms`, `confidence`, `per_group`, `ceiling_mm`,
 `at_ceiling`. A decision carries `mode` (`advise` or `auto`), `dry`, `sent`, `action` (`operation`, `value`), `reason`
 (starts with `alarm:` when a person should look), `error_mm`, `predicted_mm`, `candidates`, `hold`.
+
+## Test bench page
+
+`test.html` (tab *Test bench*) is for running a test by hand. Top: the width now (coloured by zone), the zone as Min /
+Target / Max (presets ±0.03/0.05/0.10, *Hold now*) with a meter of zone, target, 1.30 line and width, the Auto switch with
+send and gate lights, and a small raw IR view. Middle: width over the last 5/10/15 min with the noise ribbon, target,
+zone, 1.30 line, Auto-on spans and markers for Auto's commands, the operator's sends and outside changes; flow, speed and
+nozzle below on the same time axis. Right: the *Auto loop* (measure → compare → confirm → act → settle, with the current
+step in plain words and the controller's own reason), the levers (readback, Auto on/off, Auto's step, nudges and Set) and
+an event list. Everything comes from `/api/trace` and `/api/control`, so every open page shows the same history;
+nothing image-like is stored.
 
 ## Demo setup (recommended)
 

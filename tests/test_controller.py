@@ -18,8 +18,8 @@ WIDENS = {"flow_percent": 1, "speed_override_percent": -1, "nozzle_temperature_c
 
 # sim loop: what the pipeline does every second, against the bench ---------------------------------------------------
 class Loop:
-    def __init__(self, harness, controller, estimator, target_mm, auto=True, layer=10):
-        self.h, self.ctl, self.est = harness, controller, estimator
+    def __init__(self, harness, controller, estimator, target_mm, auto=True, layer=10, band=None):
+        self.h, self.ctl, self.est, self.band = harness, controller, estimator, band
         self.target, self.auto, self.layer = target_mm, auto, layer
         self.decisions, self.sent, self.history = [], [], []
         self._ids, self._next_id, self._awaiting = {}, 0, None
@@ -48,7 +48,7 @@ class Loop:
         auto = self.auto(now_ms) if callable(self.auto) else self.auto
         target = self.target(now_ms, estimate) if callable(self.target) else self.target
         d = self.ctl.step(now_ms, estimate, target, readbacks["setpoints"], {**readbacks["measured"],
-                          "extruding": True}, {"layer": self.layer}, gate_open, auto)
+                          "extruding": True}, {"layer": self.layer}, gate_open, auto, band=self.band)
         self.decisions.append((d, estimate, gate_open, auto))
         if not (auto and d.action):
             return None
@@ -81,7 +81,7 @@ REALISTIC_CAMERA_SIGMA = 0.03  # what the camera model claims per sample; it doe
 
 
 def realistic(seed=0, printer="matching", camera="matching", config=None, target=None, duration_s=600, events=(),
-              auto=True, setup=None, estimator=None, knee_mm=None, drift_px=0.0, **overrides):
+              auto=True, setup=None, estimator=None, knee_mm=None, drift_px=0.0, tune=None, band=None, **overrides):
     """SimHarness.realistic (print-2 physics, blur floor, glow, three views with +-0.15 mm offsets every 10 s,
     transport, clock skew, lost and failed results); the models match its physics but not the view offsets.
     knee_mm: the IR can't see a bead get wider than this; drift_px: the IR baseline has drifted by this much."""
@@ -95,7 +95,7 @@ def realistic(seed=0, printer="matching", camera="matching", config=None, target
         camera = StubCameraModel(k=sp.k_px_per_mm, g=sp.g_px_per_c, floor_px=sp.floor_px, knee_mm=knee_mm,
                                  ramp_mm=0.0 if knee_mm is None else HINGE_RAMP_MM, bead_px_range=(0.3, math.inf),
                                  sigma_mm=REALISTIC_CAMERA_SIGMA)
-    return _run(harness, printer, camera, config, target, auto, duration_s, events, setup, estimator)
+    return _run(harness, printer, camera, config, target, auto, duration_s, events, setup, estimator, tune, band)
 
 
 def _blind_above(sensor, knee_mm, drift_px):
@@ -121,13 +121,15 @@ HINGE = {"knee_mm": 1.5, "k_px_per_mm": 2.5,
          "group_schedule": (("cam1:-90", 0.0, 1), ("cam3:45", 0.0, 3), ("cam0:135", 0.0, 0))}
 
 
-def _run(harness, printer, camera, config, target, auto, duration_s, events=(), setup=None, estimator=None):
+def _run(harness, printer, camera, config, target, auto, duration_s, events=(), setup=None, estimator=None,
+         tune=None, band=None):
     for t, fn in events:
         harness.schedule(t, fn)
     if setup:
         setup(harness)
     target = harness.plant.true_width_mm if target is None else target
-    loop = Loop(harness, Controller(printer, config), WidthEstimator(camera, estimator), target, auto)
+    loop = Loop(harness, Controller(printer, config), WidthEstimator(camera, estimator), target, auto, band=band)
+    loop.ctl.tune(tune)
     out = harness.run(loop, duration_s)
     out["loop"], out["target"] = loop, target.held.get("mm") if callable(target) else target
     return out
@@ -457,6 +459,87 @@ def test_deadband_two_sigma_and_persistence_in_estimate_time():
     assert r.step(1.30).action is not None
 
 
+def test_the_operators_band_is_where_auto_holds_and_it_steers_to_the_target_outside():
+    r = Rig(config=NOW, target=1.50).armed(1.50)
+    band = (0.10, 0.02)  # zone 1.40-1.52, not centred on the target
+    r.c.cfg["sigma_factor"] = 0.0  # this test is about the operator's band, not the noise guard
+    for mm in (1.41, 1.50, 1.52):
+        d = r.c.step(r.t + 1000, *r_inputs(r, mm), band=band)
+        r.t += 1000
+        assert d.action is None and d.reason == "on target (inside 1.40-1.52 mm)", mm
+    d = r.c.step(r.t + 1000, *r_inputs(r, 1.53), band=band)
+    r.t += 1000
+    assert d.action is not None and d.error_mm == pytest.approx(-0.03), "just above max: narrow towards the target"
+    assert WIDENS[d.action["operation"]] * (d.action["value"] - SETPOINTS[d.action["operation"]]) < 0
+
+
+def test_the_noise_guard_holds_inside_a_band_tighter_than_the_noise():
+    r = Rig(config=NOW, target=1.50).armed(1.50)
+    d = r.c.step(r.t + 1000, *r_inputs(r, 1.44, sigma=0.04), band=(0.01, 0.01))
+    assert d.action is None and d.reason == "on target (|error| 0.060 <= noise 0.080 mm)"
+    d = r.c.step(r.t + 2000, *r_inputs(r, 1.40, sigma=0.04), band=(0.01, 0.01))
+    assert d.action is not None, "outside both the band and the noise"
+
+
+def test_without_a_band_auto_keeps_the_configured_deadband_each_side():
+    c = Controller(StubPrinterModel())
+    assert c.band_mm(None) == c.band_mm((None, None)) == c.band_mm((-1, math.nan)) == (0.05, 0.05)
+    assert c.band_mm((0.0, 0.2)) == (0.0, 0.2)
+
+
+def test_a_switched_off_lever_is_never_proposed_and_steps_only_get_smaller():
+    for off in OPS:
+        r = Rig(config=NOW, target=1.50).armed(1.50)
+        r.c.tune({off: {"enabled": False}})
+        d = r.act(1.30)
+        assert (d.action or {}).get("operation") != off and all(c["operation"] != off for c in d.candidates), off
+    r = Rig(config=NOW, target=1.50).armed(1.50)
+    r.c.tune({"speed_override_percent": {"enabled": False}, "nozzle_temperature_c": {"enabled": False}})
+    assert r.act(1.30).action["operation"] == "flow_percent"
+    r = Rig(config=NOW, target=1.50).armed(1.50)
+    r.c.tune({op: {"max_step": 2} for op in OPS})
+    d = r.act(1.10)
+    assert abs(d.action["value"] - SETPOINTS[d.action["operation"]]) <= 2
+    r.c.tune({"flow_percent": {"max_step": 50}, "speed_override_percent": {"max_step": 0.5}})
+    assert (r.c.max_step("flow_percent"), r.c.max_step("speed_override_percent")) == (10, 1), "never larger, at least 1"
+    r.c.tune({"nozzle_temperature_c": {"enabled": False, "max_step": 3}})
+    lever = r.c.limits()["levers"]["nozzle_temperature_c"]
+    assert (lever["max_step"], lever["base_max_step"], lever["enabled"]) == (3, 5, False)
+    r.c.tune(None)
+    assert r.c.lever_enabled("nozzle_temperature_c") and r.c.max_step("nozzle_temperature_c") == 5
+
+
+def test_a_smaller_step_does_not_make_a_melt_limited_lever_look_useful():
+    # Flow does next to nothing at the melt limit: the default holds, and so must a tuned 1 % or 3 % step.
+    for step in (10, 3, 1):
+        r = Rig(StubPrinterModel(melt_width_mm=1.2), config=NOW, target=1.22).armed(1.198)
+        r.c.tune({"speed_override_percent": {"enabled": False}, "nozzle_temperature_c": {"enabled": False},
+                  "flow_percent": {"max_step": step}})
+        d = r.act(1.198)
+        assert d.action is None and d.reason.endswith("alarm: no usable lever can move the width"), (step, d.reason)
+
+
+def test_the_floor_rules_act_inside_a_wide_band():
+    r = Rig(config=NOW, target=1.50).armed(1.25)
+    d = r.c.step(r.t + 1000, *r_inputs(r, 1.25), band=(0.3, 0.3))
+    assert d.action is not None and d.floor and d.reason.startswith("alarm: below 1.30 mm")
+
+
+def test_all_levers_switched_off_is_an_alarm_not_a_move():
+    r = Rig(config=NOW, target=1.50).armed(1.50)
+    r.c.tune({op: {"enabled": False} for op in OPS})
+    d = r.act(1.30)
+    assert d.action is None and d.reason.startswith("alarm: no usable lever")
+
+
+def r_inputs(r, mm, sigma=0.02):
+    """step() arguments after the time, for direct calls with a band."""
+    est = {"mm": mm, "sigma_mm": sigma, "n": 10, "age_ms": 500, "confidence": 0.9,
+           "per_group": {"1": {"mm": mm, "sigma_mm": sigma, "n": 10}}, "groups_active": 1,
+           "since_ms": r.c.estimate_since(), "ceiling_mm": None, "at_ceiling": False, "relative": False}
+    return est, r.target, dict(r.sp), dict(r.measured), dict(r.context), r.gate, r.auto
+
+
 def test_ticks_without_a_usable_estimate_pause_the_persistence_but_never_reset_it():
     # The square of 21 Oct: half the ticks had no usable estimate, so 10 estimates in a row took up to a minute.
     r = Rig().armed(1.48)
@@ -755,13 +838,15 @@ def test_config_refuses_unsafe_or_unknown_settings(bad):
 
 def test_config_merges_per_lever_and_limits_are_json_safe():
     limits = Controller(StubPrinterModel()).limits()
-    assert limits["levers"]["flow_percent"] == {"min": 70, "max": 130, "max_step": 10}
+    assert limits["levers"]["flow_percent"] == {"min": 70, "max": 130, "max_step": 10, "base_max_step": 10,
+                                                "enabled": True}
     assert set(limits["levers"]) == set(OPS)
     assert set(Controller(None, {"mode": "fallback"}).limits()["levers"]) == {"flow_percent"}
     narrower = Controller(StubPrinterModel(), {"levers": {"flow_percent": {"bounds": (90, 110)},
                                                           "nozzle_temperature_c": None}}).limits()["levers"]
-    assert narrower == {"flow_percent": {"min": 90, "max": 110, "max_step": 10},
-                        "speed_override_percent": {"min": 60, "max": 100, "max_step": 10}}
+    assert narrower == {"flow_percent": {"min": 90, "max": 110, "max_step": 10, "base_max_step": 10, "enabled": True},
+                        "speed_override_percent": {"min": 60, "max": 100, "max_step": 10, "base_max_step": 10,
+                                                   "enabled": True}}
     json.dumps(limits)
 
 
@@ -1425,8 +1510,8 @@ def test_fallback_mode_needs_no_model_and_moves_flow_proportionally():
     d = r.act(1.25)
     assert d.action == {"operation": "flow_percent", "value": 110}  # 100 * (1 + 0.5 * 0.25 / 1.25)
     assert d.candidates == [{"operation": "flow_percent", "value": 110, "from": 100.0,
-                             "predicted_change_mm": pytest.approx(0.125), "residual": pytest.approx(0.0),
-                             "score": 1.0}]
+                             "predicted_change_mm": pytest.approx(0.125), "full_step_change_mm": pytest.approx(0.125),
+                             "residual": pytest.approx(0.0), "score": 1.0}]
 
 
 def test_anchoring_evaluates_the_model_where_it_reproduces_the_measured_width():
@@ -1711,6 +1796,43 @@ def test_realistic_clog_recovers():
     settle = [settle_time(out, 60, 0.1) for out in runs]
     assert sum(t is not None and t <= 180 for t in settle) >= 18, settle
     assert all(safety_violations(out) == [] for out in runs)
+
+
+def test_realistic_clog_recovers_with_flow_only_in_small_steps():
+    # Test bench tuning: flow only, at most 3 % a command. Slower than the default (median ~100 s) but it gets there.
+    tune = {"speed_override_percent": {"enabled": False}, "nozzle_temperature_c": {"enabled": False},
+            "flow_percent": {"max_step": 3}}
+    runs = [realistic(seed, duration_s=480, events=[(60, clog(0.85))], tune=tune) for seed in range(10)]
+    settle = [settle_time(out, 60, 0.1) for out in runs]
+    assert sum(t is not None and t <= 300 for t in settle) >= 8, settle
+    for out in runs:
+        moves = [(d.action, next(c["from"] for c in d.candidates if c["operation"] == d.action["operation"]))
+                 for d, *_ in out["loop"].decisions if d.action and not d.hold]
+        assert moves and all(a["operation"] == "flow_percent" and abs(a["value"] - frm) <= 3 for a, frm in moves)
+        assert safety_violations(out) == []
+
+
+def test_realistic_random_tuning_and_bands_never_break_the_tuned_limits():
+    rng = np.random.default_rng(11)
+    for seed in range(12):
+        tune = {op: {"enabled": bool(rng.random() > 0.3),
+                     "max_step": int(rng.integers(1, control_config.DEFAULTS["levers"][op]["max_step"] + 1))} for op in OPS}
+        tune["flow_percent"]["enabled"] = tune["flow_percent"]["enabled"] or not any(t["enabled"] for t in tune.values())
+        band = tuple(float(rng.choice([0.0, 0.02, 0.05, 0.1, 0.3])) for _ in range(2))
+        factor = float(rng.choice([1.0, 2.0]))
+        events = [(float(rng.uniform(30, 200)), clog(float(rng.uniform(0.75, 1.2)))),
+                  (float(rng.uniform(200, 380)), lambda p, g, f=float(rng.uniform(0.7, 1.3)): p.set_disturbance(melt_factor=f))]
+        out = realistic(seed, duration_s=420, events=events, tune=tune, band=band, target=float(rng.uniform(1.2, 1.7)),
+                        melt_width_mm=float(rng.uniform(1.2, 2.8)), config={"floor_step_factor": factor})
+        for d, *_ in out["loop"].decisions:
+            if not d.action or d.hold:
+                continue
+            op, value = d.action["operation"], d.action["value"]
+            frm = next(c["from"] for c in d.candidates if c["operation"] == op)
+            widening = d.floor and d.error_mm > 0 and (value - frm) * WIDENS[op] > 0
+            assert tune[op]["enabled"], (seed, op)
+            assert abs(value - frm) <= tune[op]["max_step"] * (factor if widening else 1) + 1e-9, (seed, op, frm, value)
+        assert safety_violations(out, {"floor_step_factor": factor}) == []
 
 
 def test_realistic_foreign_sender_holds_and_pins():

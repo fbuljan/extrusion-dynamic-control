@@ -121,6 +121,9 @@ def limits(cfg):
     levers = cfg["levers"] if cfg["mode"] == "model" else {"flow_percent": cfg["levers"]["flow_percent"]}
     return {"mode": cfg["mode"], "min_spacing_ms": cfg["min_spacing_ms"], "pin_s": cfg["pin_s"],
             "min_layer": cfg["min_layer"], "min_width_mm": cfg["min_width_mm"],
-            "floor_step_factor": cfg["floor_step_factor"],
+            "floor_step_factor": cfg["floor_step_factor"], "band_default_mm": cfg["deadband_mm"],
+            "sigma_factor": cfg["sigma_factor"], "kappa": cfg["kappa"], "persist_s": cfg["persist_s"],
+            "persist_estimates": cfg["persist_estimates"], "settle_samples": cfg["settle_samples"],
+            "foreign_hold_s": cfg["foreign_hold_s"],
             "levers": {op: {"min": s["bounds"][0], "max": s["bounds"][1], "max_step": s["max_step"]}
                        for op, s in levers.items()}}

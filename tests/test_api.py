@@ -12,7 +12,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server import model_files
-from server.control_state import ControlState
+from server.control_state import ControlState, default_levers
+
+UNTUNED = {"band_below_mm": None, "band_above_mm": None, "levers": default_levers()}
 
 BROKER_ENV = ["MQTT_HOST", "MQTT_PORT", "MQTT_USER", "MQTT_PASSWORD", "MQTT_WRITER_USER", "MQTT_WRITER_PASSWORD",
               "MQTT_CONTROLLER_ID"]
@@ -72,7 +74,7 @@ def test_control_defaults(api):
     server_ms = body.pop("server_ms")
     assert isinstance(server_ms, int) and abs(server_ms - time.time() * 1000) < 5000
     assert body == {
-        "target_mm": None, "auto": False, "estimate": None, "last_decision": None, "pinned": {}, "limits": {},
+        "target_mm": None, "auto": False, **UNTUNED, "estimate": None, "last_decision": None, "pinned": {}, "limits": {},
         "ceiling_mm": None, "relative": False,
         "models": {name: {"present": False, "version": None, "error": None}
                    for name in ("geometry", "camera_model", "printer_model")},
@@ -94,7 +96,7 @@ def test_post_persists_across_a_fresh_control_state(api):
 def test_auto_never_survives_a_restart(tmp_path):
     path = tmp_path / "control.json"
     state = ControlState(path)
-    assert state.update({"target_mm": 0.7, "auto": True}) == {"target_mm": 0.7, "auto": True}
+    assert state.update({"target_mm": 0.7, "auto": True}) == {"target_mm": 0.7, "auto": True, **UNTUNED}
     assert state.auto is True
     fresh = ControlState(path)
     assert (fresh.target_mm, fresh.auto, fresh.load_error) == (0.7, False, None)
@@ -129,7 +131,59 @@ def test_invalid_input_is_400_and_changes_nothing(api, payload):
     assert isinstance(r.json()["error"], str) and r.json()["error"]
     body = api.client.get("/api/control").json()
     assert (body["target_mm"], body["auto"]) == (0.6, False)
-    assert ControlState(api.data / "control.json").public() == {"target_mm": 0.6, "auto": False}
+    assert ControlState(api.data / "control.json").public() == {"target_mm": 0.6, "auto": False, **UNTUNED}
+
+
+def test_the_band_persists_with_the_target_and_tuning_lives_in_memory(api):
+    r = api.client.post("/api/control", json={"target_mm": 1.5, "band_below_mm": 0.08, "band_above_mm": 0.0,
+                                                "levers": {"flow_percent": {"max_step": 3},
+                                                           "nozzle_temperature_c": {"enabled": False}}})
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["band_below_mm"], body["band_above_mm"]) == (0.08, 0.0)
+    assert body["levers"]["flow_percent"] == {"enabled": True, "max_step": 3}
+    assert body["levers"]["nozzle_temperature_c"] == {"enabled": False, "max_step": None}
+    api.client.post("/api/control", json={"levers": {"flow_percent": {"enabled": False}}})
+    assert api.client.get("/api/control").json()["levers"]["flow_percent"] == {"enabled": False, "max_step": 3}, \
+        "merged per lever"
+    assert json.loads((api.data / "control.json").read_text()) == {"target_mm": 1.5, "band_below_mm": 0.08,
+                                                                   "band_above_mm": 0.0}
+    fresh = ControlState(api.data / "control.json")
+    assert fresh.public() == {"target_mm": 1.5, "auto": False, "band_below_mm": 0.08, "band_above_mm": 0.0,
+                              "levers": default_levers()}, "tuning starts from the configured levers"
+    api.client.post("/api/control", json={"band_below_mm": None})
+    assert json.loads((api.data / "control.json").read_text()) == {"target_mm": 1.5, "band_above_mm": 0.0}
+
+
+@pytest.mark.parametrize("payload", [
+    {"band_below_mm": -0.01}, {"band_above_mm": 1.01}, {"band_below_mm": "0.1"}, {"band_above_mm": True},
+    {"band_below_mm": [0.1]},
+    {"levers": {"fan_speed_percent": {"enabled": False}}}, {"levers": {"flow_percent": {"max_step": 11}}},
+    {"levers": {"nozzle_temperature_c": {"max_step": 6}}}, {"levers": {"flow_percent": {"max_step": 0}}},
+    {"levers": {"flow_percent": {"max_step": 2.5}}}, {"levers": {"flow_percent": {"enabled": "no"}}},
+    {"levers": {"flow_percent": {"bounds": [0, 200]}}}, {"levers": [1]},
+    {"levers": {op: {"enabled": False} for op in ("flow_percent", "speed_override_percent", "nozzle_temperature_c")}},
+])
+def test_invalid_band_or_tuning_is_400_and_changes_nothing(api, payload):
+    api.client.post("/api/control", json={"band_below_mm": 0.1})
+    r = api.client.post("/api/control", json=payload)
+    assert r.status_code == 400 and r.json()["error"]
+    body = api.client.get("/api/control").json()
+    assert (body["band_below_mm"], body["band_above_mm"], body["levers"]) == (0.1, None, default_levers())
+
+
+def test_the_trace_serves_rows_and_the_operators_changes(api):
+    api.client.post("/api/control", json={"auto": True, "band_above_mm": 0.1})
+    api.client.post("/api/control", json={"levers": {"speed_override_percent": {"max_step": 4}}})
+    api.client.post("/api/control", json={"auto": True})  # no change, no event
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not api.client.get("/api/trace").json()["rows"]:
+        time.sleep(0.1)
+    body = api.client.get("/api/trace").json()
+    assert body["running"] is True and body["rows"][-1]["reason"].startswith("no model")
+    assert [e["kind"] for e in body["events"]] == ["auto", "band", "levers"]
+    assert body["events"][1]["band_above_mm"] == 0.1
+    assert api.client.get("/api/trace", params={"since_ms": body["server_ms"] + 60_000}).json()["rows"] == []
 
 
 def test_invalid_field_blocks_the_valid_one(api):
@@ -161,7 +215,7 @@ def test_control_state_defaults_on_damaged_file(tmp_path):
     for text in ("{not json", "[1]", '{"target_mm": 99}', '{"target_mm": "0.8"}', "[" * 200_000, ""):
         path.write_text(text)
         state = ControlState(path)
-        assert state.public() == {"target_mm": None, "auto": False}
+        assert state.public() == {"target_mm": None, "auto": False, **UNTUNED}
         assert state.load_error
 
 
@@ -169,7 +223,7 @@ def test_unreadable_control_path_still_starts(tmp_path):
     path = tmp_path / "control.json"
     path.mkdir()
     state = ControlState(path)
-    assert state.public() == {"target_mm": None, "auto": False} and state.load_error
+    assert state.public() == {"target_mm": None, "auto": False, **UNTUNED} and state.load_error
 
 
 @pytest.mark.parametrize("control_json", ["{broken"])

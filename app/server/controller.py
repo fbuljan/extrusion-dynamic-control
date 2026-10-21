@@ -19,6 +19,9 @@ widening steps go like narrowing ones. A usable estimate below `min_width_mm` le
 switches on the floor rules (D48) while the bead is narrower than wanted: act inside the noise band, on confidence down
 to `floor_min_confidence`, with steps up to `floor_step_factor` x max_step (1 by default), for `floor_hold_s` after the
 last estimate below the floor while under `min_width_mm` + `floor_release_mm`. Such decisions say "floor rules: ".
+The operator's allowed band (`band`: mm below and above the target, default `deadband_mm` each side) is where Auto holds;
+outside it, it steers towards the target. The noise band stays a hold too, so a band tighter than the noise can't make it
+chase noise. `tune` switches levers off for Auto or makes their steps smaller, never larger.
 """
 import math
 import statistics
@@ -119,6 +122,7 @@ class Controller:
         self._floor = False  # the floor rules apply this tick (see _step)
         self._floor_until = -math.inf
         self._feed, self._feed_ms = 1.0, None  # anchor: estimate / model width, smoothed
+        self._tuning = {}  # op -> {"enabled", "max_step"}: the operator's switches and smaller steps
 
     # caller notes ---------------------------------------------------------------------------------------------------
     def estimate_since(self):
@@ -126,7 +130,30 @@ class Controller:
         return self._since
 
     def limits(self):
-        return control_config.limits(self.cfg)
+        out = control_config.limits(self.cfg)
+        for op, lever in out["levers"].items():
+            lever.update(base_max_step=lever["max_step"], max_step=self.max_step(op), enabled=self.lever_enabled(op))
+        return out
+
+    def tune(self, levers):
+        """The operator's per-lever tuning ({op: {"enabled", "max_step"}}; None or a missing op: as configured). A
+        max_step above the configured one is ignored: tuning only ever makes Auto gentler."""
+        tuning = {}
+        for op, spec in (levers or {}).items():
+            if op in self.levers and isinstance(spec, dict):
+                step = spec.get("max_step")
+                tuning[op] = {"enabled": spec.get("enabled") is not False,
+                              "max_step": max(1, step) if _finite(step) else None}
+        self._tuning = tuning
+
+    def lever_enabled(self, op):
+        return self._tuning.get(op, {}).get("enabled", True)
+
+    def max_step(self, op):
+        """The largest move Auto makes on this lever per command, outside the floor rules."""
+        base = self.levers[op]["max_step"]
+        step = self._tuning.get(op, {}).get("max_step")
+        return min(base, step) if step is not None else base
 
     def note_sent(self, operation, value, request_id, now_ms):
         p = self._proposal if self._proposal and self._proposal["action"] == {"operation": operation, "value": value} \
@@ -329,8 +356,8 @@ class Controller:
         self._gate_after(now_ms, change=False)
 
     # decision -------------------------------------------------------------------------------------------------------
-    def step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto):
-        d = self._step(now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto)
+    def step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto, band=None):
+        d = self._step(now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto, band)
         d.reason = lead_with(self.walls_alarm(estimate), d.reason)  # an alarm on the bead, not a hold
         return d
 
@@ -350,7 +377,13 @@ class Controller:
         """The alarm for an estimate below min_width_mm, or None."""
         return f"alarm: below {self.cfg['min_width_mm']:.2f} mm (walls may not touch)" if self._below_floor(estimate) else None
 
-    def _step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto):
+    def band_mm(self, band):
+        """(mm below, mm above) the target where Auto holds: the operator's, or deadband_mm each side."""
+        below, above = band if isinstance(band, (tuple, list)) and len(band) == 2 else (None, None)
+        default = self.cfg["deadband_mm"]
+        return tuple(v if _finite(v) and v >= 0 else default for v in (below, above))
+
+    def _step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto, band=None):
         cfg = self.cfg
         mode = "auto" if auto else "advise"
         self._floor = False
@@ -445,13 +478,19 @@ class Controller:
             return hold(f"alarm: printer model {e}")
         if self._last_action_ms is not None and now_ms - self._last_action_ms < cfg["min_spacing_ms"]:
             return hold("spacing")
-        band = max(cfg["deadband_mm"], cfg["sigma_factor"] * estimate["sigma_mm"])
-        if abs(error) <= band and not self._floor:
+        below, above = self.band_mm(band)
+        noise = cfg["sigma_factor"] * estimate["sigma_mm"]
+        inside = -above - 1e-9 <= error <= below + 1e-9  # error > 0: narrower; a typed edge (1.52 - 1.50) is inside
+        if (inside or abs(error) <= noise) and not self._floor:
             self._unreachable_steps, self._streak = 0, None
             if at_ceiling:
                 seen = min(estimate["mm"], ceiling)  # the bead is at least this wide, maybe wider
                 return hold(f"at the camera's ceiling (≥ {seen:.2f} mm): can't confirm the width")
-            return hold(f"on target (|error| {abs(error):.3f} <= {band:.3f} mm)")
+            if inside:
+                return hold(f"on target (inside {target_mm - below:.2f}-{target_mm + above:.2f} mm)")
+            return hold(f"on target (|error| {abs(error):.3f} <= noise {noise:.3f} mm)")
+        # The hold zone's edge on this side; the floor rules ignore the operator's band (it may reach below the floor).
+        slack = max(cfg["deadband_mm"] if self._floor else below if error > 0 else above, noise)
         if error > 0 and at_ceiling:  # a wider bead would read the same: never widen blind
             return hold(f"at the camera's ceiling: can't see wider than {ceiling:.2f} mm")
         if error > 0 and self._saturated:
@@ -479,14 +518,16 @@ class Controller:
         except ModelFailure as e:
             return hold(f"alarm: printer model {e}")
         direction = 1 if error > 0 else -1
-        reachable = reach * direction >= abs(error) - band
+        reachable = reach * direction >= abs(error) - slack
         out_of_reach = f"target out of reach (needs {error:+.2f} mm, usable levers at their limits give {reach:+.2f})"
         if reachable:
             self._unreachable_steps = 0
         elif self._unreachable_steps >= 1:
             return hold(f"alarm: {out_of_reach}", candidates)
-        if best is None or best["predicted_change_mm"] * direction < cfg["min_effect_fraction"] * cfg["kappa"] * abs(
-                error):
+        # A smaller step promises less by design: whether a tuned lever does anything is judged on its configured step.
+        tuned = best is not None and self.max_step(best["operation"]) < self.levers[best["operation"]]["max_step"]
+        promise = best["full_step_change_mm"] if tuned else best["predicted_change_mm"] if best else 0.0
+        if best is None or promise * direction < cfg["min_effect_fraction"] * cfg["kappa"] * abs(error):
             disabled = [r for op, r in self._disabled.items() if op in self.levers]
             why = "alarm: no usable lever can move the width"
             if disabled:
@@ -614,6 +655,8 @@ class Controller:
         return f"waiting for {what} to take effect ({n}/{self.cfg['settle_samples']} samples{views})"
 
     def _excluded(self, op, now_ms):
+        if not self.lever_enabled(op):
+            return "switched off"
         if op in self._disabled:
             return self._disabled[op]
         if op in self._pins and self._pins[op]["until_ms"] > now_ms:
@@ -623,7 +666,7 @@ class Controller:
     def _window(self, op, value):
         spec = self.levers[op]
         lo, hi = spec["bounds"]
-        step = spec["max_step"] * (self.cfg["floor_step_factor"] if self._floor else 1)
+        step = self.max_step(op) * (self.cfg["floor_step_factor"] if self._floor else 1)
         return max(lo, value - step), min(hi, value + step)
 
     def _within_limits(self, action, current):
@@ -705,6 +748,9 @@ class Controller:
                 if top is None or score < top["score"]:
                     top = {"operation": op, "value": v, "from": c, "predicted_change_mm": change,
                            "residual": residual, "score": score}
+            base = spec["max_step"] * (cfg["floor_step_factor"] if self._floor else 1)
+            full = min(spec["bounds"][1], max(spec["bounds"][0], c + math.copysign(base, top["value"] - c)))
+            top["full_step_change_mm"] = width(op, full) - w0
             candidates.append(top)
             if best is None or top["score"] < best["score"]:
                 best = top
@@ -739,6 +785,9 @@ class Controller:
         if why or abs(value - c) < 0.5 or (op, value) in self._refused:
             return None, [], reach
         change = mm * (value - c) / c
+        base = self.levers[op]["max_step"] * (cfg["floor_step_factor"] if self._floor else 1)
+        full = min(b_hi, max(b_lo, c + math.copysign(base, value - c)))
         best = {"operation": op, "value": value, "from": c, "predicted_change_mm": change,
+                "full_step_change_mm": mm * (full - c) / c,
                 "residual": abs(cfg["kappa"] * error - change) / abs(cfg["kappa"] * error), "score": 1.0}
         return best, [best], reach
