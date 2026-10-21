@@ -133,14 +133,15 @@ def _floor_widening(decision, current):
 def env_controller(environ=None):
     """Controller overrides from CONTROL_PIN_S (seconds an operator's change is left alone), CONTROL_MIN_LAYER (first
     layer Auto may act on), CONTROL_FLOOR_STEP_FACTOR (step multiple under the floor rules, 1-2), CONTROL_PERSIST_S and
-    CONTROL_PERSIST_ESTIMATES (how long a deviation must last) and CONTROL_KAPPA (share of the gap per command); a bad
-    value keeps that setting's default."""
+    CONTROL_PERSIST_ESTIMATES (how long a deviation must last), CONTROL_KAPPA (share of the gap per command) and
+    CONTROL_MIN_WIDTH_MM (the walls limit); a bad value keeps that setting's default. The operator's settings on the Test
+    bench go over these."""
     environ = os.environ if environ is None else environ
     overrides = {}
     for var, key, cast in (("CONTROL_PIN_S", "pin_s", float), ("CONTROL_MIN_LAYER", "min_layer", int),
                            ("CONTROL_FLOOR_STEP_FACTOR", "floor_step_factor", float),
                            ("CONTROL_PERSIST_S", "persist_s", float), ("CONTROL_PERSIST_ESTIMATES", "persist_estimates", int),
-                           ("CONTROL_KAPPA", "kappa", float)):
+                           ("CONTROL_KAPPA", "kappa", float), ("CONTROL_MIN_WIDTH_MM", "min_width_mm", float)):
         raw = environ.get(var)
         if raw is None:
             continue
@@ -569,6 +570,7 @@ class Pipeline:
         band = (view.get("band_below_mm"), view.get("band_above_mm"))
         try:
             self._drain()
+            self.controller.configure(view.get("settings"))
             self.controller.tune(view.get("levers"))
             out = self._step(now, view["target_mm"], auto, view.get("target_stamp"), band)
             self._pinned = self.controller.pinned(now)
@@ -600,6 +602,7 @@ class Pipeline:
                # the noise band Auto holds within: from the controller's own (longer) estimate
                "noise_mm": self.controller.cfg["sigma_factor"] * judged_sigma if is_number(judged_sigma) else None,
                "target_mm": target, "band_below_mm": below, "band_above_mm": above,
+               "min_width_mm": self.controller.cfg.get("min_width_mm"),
                "auto": view["auto"] is True, "gate_open": self.gate_open(now),
                "flow": setpoints.get("flow_percent"), "speed": setpoints.get("speed_override_percent"),
                "nozzle_target": setpoints.get("nozzle_temperature_c"), "nozzle_c": measured.get("nozzle_c"),

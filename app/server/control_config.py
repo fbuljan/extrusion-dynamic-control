@@ -72,6 +72,12 @@ FLOORS = {"min_spacing_ms": (2000, None), "max_failures": (1, 3), "foreign_hold_
           "floor_step_factor": (1.0, 2.0), "floor_hold_s": (0, 60), "floor_release_mm": (0, 0.2)}
 
 
+# What the operator may set at runtime on the Test bench, and the range the app accepts (int: whole numbers only).
+OPERATOR = {"min_width_mm": (0.8, 2.0, float), "persist_s": (0.0, 60.0, float), "persist_estimates": (1, 20, int),
+            "kappa": (0.1, 1.0, float), "pin_s": (60.0, 900.0, float), "min_layer": (1, 50, int),
+            "floor_step_factor": (1.0, 2.0, float)}
+
+
 def load(overrides=None):
     cfg = copy.deepcopy(DEFAULTS)
     for key, value in (overrides or {}).items():

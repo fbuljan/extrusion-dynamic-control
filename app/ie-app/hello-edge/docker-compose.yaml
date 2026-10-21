@@ -33,6 +33,8 @@ services:
       CONTROL_PERSIST_S: ${CONTROL_PERSIST_S:-10}
       CONTROL_PERSIST_ESTIMATES: ${CONTROL_PERSIST_ESTIMATES:-5}
       CONTROL_KAPPA: ${CONTROL_KAPPA:-0.5}
+      # Walls limit: below it the alarm shows and Auto's floor rules act (controller default 1.30); D52.
+      CONTROL_MIN_WIDTH_MM: ${CONTROL_MIN_WIDTH_MM:-1.30}
       # Averaging window of the displayed width in s (the controller keeps its own 25 s); D51.
       DISPLAY_WINDOW_S: ${DISPLAY_WINDOW_S:-15}
     logging:

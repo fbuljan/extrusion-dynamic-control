@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from server import model_files
 from server.control_state import ControlState, default_levers
 
-UNTUNED = {"band_below_mm": None, "band_above_mm": None, "levers": default_levers()}
+UNTUNED = {"band_below_mm": None, "band_above_mm": None, "levers": default_levers(), "settings": {}}
 
 BROKER_ENV = ["MQTT_HOST", "MQTT_PORT", "MQTT_USER", "MQTT_PASSWORD", "MQTT_WRITER_USER", "MQTT_WRITER_PASSWORD",
               "MQTT_CONTROLLER_ID"]
@@ -150,7 +150,7 @@ def test_the_band_persists_with_the_target_and_tuning_lives_in_memory(api):
                                                                    "band_above_mm": 0.0}
     fresh = ControlState(api.data / "control.json")
     assert fresh.public() == {"target_mm": 1.5, "auto": False, "band_below_mm": 0.08, "band_above_mm": 0.0,
-                              "levers": default_levers()}, "tuning starts from the configured levers"
+                              "levers": default_levers(), "settings": {}}, "tuning starts from the configured levers"
     api.client.post("/api/control", json={"band_below_mm": None})
     assert json.loads((api.data / "control.json").read_text()) == {"target_mm": 1.5, "band_above_mm": 0.0}
 
@@ -163,13 +163,29 @@ def test_the_band_persists_with_the_target_and_tuning_lives_in_memory(api):
     {"levers": {"flow_percent": {"max_step": 2.5}}}, {"levers": {"flow_percent": {"enabled": "no"}}},
     {"levers": {"flow_percent": {"bounds": [0, 200]}}}, {"levers": [1]},
     {"levers": {op: {"enabled": False} for op in ("flow_percent", "speed_override_percent", "nozzle_temperature_c")}},
+    {"settings": {"min_width_mm": 0.5}}, {"settings": {"min_width_mm": 2.5}}, {"settings": {"min_width_mm": "1.4"}},
+    {"settings": {"persist_estimates": 2.5}}, {"settings": {"pin_s": 30}}, {"settings": {"kappa": 0}},
+    {"settings": {"kappa": True}}, {"settings": {"deadband_mm": 0.1}}, {"settings": [1]},
+    {"settings": {"min_width_mm": 1.4, "floor_step_factor": 3}},
 ])
 def test_invalid_band_or_tuning_is_400_and_changes_nothing(api, payload):
     api.client.post("/api/control", json={"band_below_mm": 0.1})
     r = api.client.post("/api/control", json=payload)
     assert r.status_code == 400 and r.json()["error"]
     body = api.client.get("/api/control").json()
-    assert (body["band_below_mm"], body["band_above_mm"], body["levers"]) == (0.1, None, default_levers())
+    assert (body["band_below_mm"], body["band_above_mm"], body["levers"], body["settings"]) == \
+        (0.1, None, default_levers(), {})
+
+
+def test_operator_settings_merge_persist_and_reset(api):
+    r = api.client.post("/api/control", json={"settings": {"min_width_mm": 1.45, "persist_estimates": 3}})
+    assert r.status_code == 200 and r.json()["settings"] == {"min_width_mm": 1.45, "persist_estimates": 3}
+    api.client.post("/api/control", json={"settings": {"kappa": 0.7, "min_width_mm": None}})
+    assert api.client.get("/api/control").json()["settings"] == {"persist_estimates": 3, "kappa": 0.7}, \
+        "merged per key; None goes back to the deployment's value"
+    assert json.loads((api.data / "control.json").read_text())["settings"] == {"persist_estimates": 3, "kappa": 0.7}
+    assert ControlState(api.data / "control.json").public()["settings"] == {"persist_estimates": 3, "kappa": 0.7}
+    assert isinstance(ControlState(api.data / "control.json").public()["settings"]["persist_estimates"], int)
 
 
 def test_the_trace_serves_rows_and_the_operators_changes(api):

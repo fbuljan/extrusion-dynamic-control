@@ -148,6 +148,7 @@ Set `DATA_DIR` as above to keep runs out of the app folder: the default `app/.da
 | `CONTROL_MIN_LAYER` | 6 | First layer Auto may act on (at least 1) |
 | `CONTROL_FLOOR_STEP_FACTOR` | 1.0 | Step multiple for a floor-rules widening step below 1.30 mm, 1–2 (D48) |
 | `CONTROL_PERSIST_S`, `CONTROL_PERSIST_ESTIMATES`, `CONTROL_KAPPA` | 10, 5, 0.5 | How long and over how many estimates a deviation must last, and the share of the gap one command closes (D51; the device runs 5, 3, 0.7) |
+| `CONTROL_MIN_WIDTH_MM` | 1.30 | The walls limit: below it the alarm shows and the floor rules act (D52; the device runs 1.45) |
 | `DISPLAY_WINDOW_S` | 15 | Averaging window of the displayed width; the controller keeps 25 s (D51) |
 | `MODELS_DIR` | `app/models` | Folder with `geometry.json`, `camera_model.json`, `printer_model.json`. A missing file is a "no model" state, not a crash |
 | `DATA_DIR` | `app/.data` | `control.json` (target), `prototype.db`, `settings.json`. The image uses `/cfg-data` |
@@ -211,8 +212,8 @@ Recordings with IR frames stay under `data/captures/` and outputs under `data/mo
 
 | Endpoint | What |
 |---|---|
-| `GET /api/control` | `target_mm`, `auto`, `send_enabled`, `estimate`, `last_decision`, `pinned`, `models`, `limits`, `ceiling_mm`, `relative`, `server_ms`, `persist_error`, `load_error` |
-| `POST /api/control` | `{"target_mm": number or null, "auto": bool, "hold_current": true, "band_below_mm": 0–1 or null, "band_above_mm": 0–1 or null, "levers": {op: {"enabled": bool, "max_step": whole number from 1 to the configured step, or null}}}`, any subset; levers merge per lever; returns the same view. 400 with `{"error"}` for a target outside 0.3–5.0 mm or above the camera ceiling, `target_mm` together with `hold_current`, or `hold_current` without a fresh estimate of confidence ≥ 0.5. `send_enabled` is read-only: it comes from the environment |
+| `GET /api/control` | `target_mm`, `auto`, `send_enabled`, `estimate`, `last_decision`, `pinned`, `models`, `limits` (with `defaults`: the deployment's values of the operator settings), `settings`, `ceiling_mm`, `relative`, `server_ms`, `persist_error`, `load_error` |
+| `POST /api/control` | `{"target_mm": number or null, "auto": bool, "hold_current": true, "band_below_mm": 0–1 or null, "band_above_mm": 0–1 or null, "levers": {op: {"enabled": bool, "max_step": whole number from 1 to the configured step, or null}}, "settings": {key: number or null}}`, any subset; levers and settings merge per key (settings: D52 lists the keys and ranges); returns the same view. 400 with `{"error"}` for a target outside 0.3–5.0 mm or above the camera ceiling, `target_mm` together with `hold_current`, or `hold_current` without a fresh estimate of confidence ≥ 0.5. `send_enabled` is read-only: it comes from the environment |
 | `GET /api/trace?since_ms=` | The Test bench's history: one scalar row per control step for 15 min (`mm`, `sigma_mm`, `noise_mm`, `judged_mm`, `confidence`, `target_mm`, `band_below_mm`/`band_above_mm` as applied, `auto`, `dry`, `gate_open`, `flow`, `speed`, `nozzle_target`, `nozzle_c`, `layer`, `action`, `sent`, `hold`, `floor`, `reason`) and the operator's `events` (`manual` sends, `auto`, `target`, `band`, `levers`), newer than `since_ms` |
 | `GET /api/pipeline` | Health of the width loop: `running`, `extraction`, `missing` models, `clock_offset_ms`, `clock_alarm`, `gate_open`, `camera_provenance`, counters (`frames_done`, `frames_dropped`, `sent`, `send_refused`, `send_failed`, `send_uncertain`, `foreign_results`), errors per stage, model versions |
 | WebSocket `/ws` | New message types `width` (the estimate, ≤ 2 Hz) and `decision` (every control step, 1 Hz) next to the existing ones |
@@ -223,13 +224,14 @@ An estimate carries `mm`, `sigma_mm`, `model_sigma_mm`, `n`, `age_ms`, `confiden
 
 ## Test bench page
 
-`test.html` (tab *Test bench*) is for running a test by hand. Top: the width now (coloured by zone), the zone as Min /
-Target / Max (presets ±0.03/0.05/0.10, *Hold now*) with a meter of zone, target, 1.30 line and width, the Auto switch with
+`test.html` (tab *Test bench*) is for running a test by hand. Top: the width now (coloured by zone), the walls limit and
+the zone as Walls / Min / Target / Max (presets ±0.03/0.05/0.10, *Hold now*) with a meter of zone, target, walls line and width, the Auto switch with
 send and gate lights, and a small raw IR view. Middle: width over the last 5/10/15 min with the noise ribbon, target,
-zone, 1.30 line, Auto-on spans and markers for Auto's commands, the operator's sends and outside changes; flow, speed and
+zone, walls line, Auto-on spans and markers for Auto's commands, the operator's sends and outside changes; flow, speed and
 nozzle below on the same time axis. Right: the *Auto loop* (measure → compare → confirm → act → settle, with the current
-step in plain words and the controller's own reason), the levers (readback, Auto on/off, Auto's step, nudges and Set) and
-an event list. Everything comes from `/api/trace` and `/api/control`, so every open page shows the same history;
+step in plain words and the controller's own reason), the levers (readback, Auto on/off, Auto's step, nudges and Set),
+*Auto settings* (confirm time and readings, step size, hands-off time, first Auto layer, walls step; each with its
+deployment default and a reset, D52) and an event list. Everything comes from `/api/trace` and `/api/control`, so every open page shows the same history;
 nothing image-like is stored.
 
 ## Demo setup (recommended)

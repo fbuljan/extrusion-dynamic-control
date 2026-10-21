@@ -1899,3 +1899,16 @@ def test_realistic_property_random_events_never_break_limits():
                         cancel_on_gate_close=True, melt_width_mm=float(rng.uniform(1.6, 2.8)),
                         target=float(rng.uniform(1.3, 1.7)))
         assert safety_violations(out) == [], seed
+
+
+def test_operator_settings_apply_over_the_deployment_and_report_its_defaults():
+    c = Controller(StubPrinterModel(), {"persist_s": 5.0, "min_width_mm": 1.30})
+    c.configure({"min_width_mm": 1.45, "kappa": 0.7, "pin_s": None})
+    assert (c.cfg["min_width_mm"], c.cfg["kappa"], c.cfg["persist_s"]) == (1.45, 0.7, 5.0)
+    limits = c.limits()
+    assert limits["min_width_mm"] == 1.45 and limits["defaults"]["min_width_mm"] == 1.30
+    assert limits["defaults"]["persist_s"] == 5.0
+    c.configure({"floor_step_factor": 5.0})
+    assert c.cfg["min_width_mm"] == 1.45 and c.cfg["floor_step_factor"] != 5.0, "an invalid set changes nothing"
+    c.configure({})
+    assert (c.cfg["min_width_mm"], c.cfg["kappa"]) == (1.30, control_config.DEFAULTS["kappa"])

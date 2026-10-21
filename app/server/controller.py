@@ -93,6 +93,8 @@ class Decision:
 class Controller:
     def __init__(self, printer_model, config=None):
         self.model = printer_model
+        self._config = dict(config or {})  # the deployment's overrides, under the operator's settings
+        self._operator = {}
         self.cfg = control_config.load(config)
         self.levers = (self.cfg["levers"] if self.cfg["mode"] == "model"
                        else {"flow_percent": self.cfg["levers"]["flow_percent"]})
@@ -131,9 +133,24 @@ class Controller:
 
     def limits(self):
         out = control_config.limits(self.cfg)
+        base = control_config.load(self._config)
+        out["defaults"] = {k: base[k] for k in control_config.OPERATOR}  # what the deployment runs without the operator
         for op, lever in out["levers"].items():
             lever.update(base_max_step=lever["max_step"], max_step=self.max_step(op), enabled=self.lever_enabled(op))
         return out
+
+    def configure(self, settings):
+        """The operator's runtime settings (control_config.OPERATOR keys; None or missing: the deployment's value).
+        An invalid set leaves the current config in place."""
+        want = {k: v for k, v in (settings or {}).items() if k in control_config.OPERATOR and v is not None}
+        if want == self._operator:
+            return
+        try:
+            cfg = control_config.load({**self._config, **want})
+        except ValueError:
+            return
+        self.cfg, self._operator = cfg, want
+        self.levers = cfg["levers"] if cfg["mode"] == "model" else {"flow_percent": cfg["levers"]["flow_percent"]}
 
     def tune(self, levers):
         """The operator's per-lever tuning ({op: {"enabled", "max_step"}}; None or a missing op: as configured). A

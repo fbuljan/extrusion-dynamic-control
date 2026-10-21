@@ -34,6 +34,7 @@ const controlOk = () => !controlFailed && control && Date.now() - controlOkAt <=
 const lastRow = () => rows[rows.length - 1] || null;
 const liveRow = () => { const r = lastRow(); return r && linkOk() && serverNow() - r.t_ms <= ROW_STALE_MS ? r : null; };
 const liveEstimate = () => (estimate && Date.now() - estimate.at <= ESTIMATE_STALE_MS ? estimate : null);
+const wallsMm = () => control?.settings?.min_width_mm ?? control?.limits?.min_width_mm;
 const bandOf = c => {
   const d = isNum(c?.limits?.band_default_mm) ? c.limits.band_default_mm : 0.05;
   return [isNum(c?.band_below_mm) ? c.band_below_mm : d, isNum(c?.band_above_mm) ? c.band_above_mm : d];
@@ -181,7 +182,7 @@ const widthChart = makeChart("c-width", [
   line("noise high", "transparent", { borderWidth: 0, fill: { target: 3 }, backgroundColor: tint(C.accent, 16), quiet: true }),
   line("noise low", "transparent", { borderWidth: 0, quiet: true }),
   line("target", C.silk, { borderDash: [6, 4], stepped: "before" }),
-  line("1.30 walls", C.bad, { borderWidth: 1, borderDash: [2, 3], quiet: true }),
+  line("walls", C.bad, { borderWidth: 1, borderDash: [2, 3], stepped: "before", quiet: true }),
   line("width", C.accent, { borderWidth: 2 }),
 ], { ticks: true, main: true, y: { ticks: { maxTicksLimit: 7, callback: v => Number(v).toFixed(2) } } });
 widthChart.options.plugins.tooltip.callbacks.label = item => `${item.dataset.label} ${Number(item.parsed.y).toFixed(3)} mm`;
@@ -230,8 +231,8 @@ function redraw() {
   nLo.data = pts(r => (isNum(r.mm) && isNum(r.sigma_mm) ? r.mm - r.sigma_mm : null));
   target.data = pts(r => r.target_mm);
   width.data = pts(r => r.mm);
-  const floorMm = control?.limits?.min_width_mm;
-  walls.data = isNum(floorMm) ? [{ x: t0, y: floorMm }, { x: now, y: floorMm }] : [];
+  const floorMm = wallsMm();
+  walls.data = isNum(floorMm) ? [...pts(r => (isNum(r.min_width_mm) ? r.min_width_mm : floorMm)), { x: now, y: floorMm }] : [];
   // Keep the zone, the target and the walls line in view, and a little room around the width.
   const dots = frames.filter(f => isNum(f.mm) && f.t_ms >= t0);
   const ys = [...width.data, ...zMin.data, ...zMax.data].map(p => p.y).filter(isNum);
@@ -239,7 +240,7 @@ function redraw() {
     const sorted = dots.map(d => d.mm).sort((p, q) => p - q);
     ys.push(sorted[Math.floor(sorted.length * 0.05)], sorted[Math.floor(sorted.length * 0.95)]);
   }
-  if (isNum(floorMm)) ys.push(floorMm);
+  ys.push(...walls.data.map(p => p.y).filter(isNum));
   const lo = ys.length ? Math.min(...ys) : 1.2, hi = ys.length ? Math.max(...ys) : 1.8;
   const pad = Math.max(0.05, (hi - lo) * 0.12);
   Object.assign(widthChart.options.scales.y, { min: Math.floor((lo - pad) * 20) / 20, max: Math.ceil((hi + pad) * 20) / 20 });
@@ -335,6 +336,10 @@ function serverEventView(e) {
     const side = v => (isNum(v) ? fmt(v, 2) : "default");
     return { t, tag: "zone", text: `zone −${side(e.band_below_mm)} / +${side(e.band_above_mm)} mm around the target` };
   }
+  if (e.kind === "settings") {
+    const set = Object.entries(e.settings || {}).map(([k, v]) => `${SETTING_BY_KEY[k]?.short ?? k} ${settingText(k, v)}`);
+    return { t, tag: "settings", text: `Auto settings: ${set.length ? set.join(", ") : "all from the deployment"}` };
+  }
   if (e.kind === "levers") {
     const parts = Object.entries(e.levers || {}).map(([op, s]) => `${nameOf(op)} ${s.enabled ? `≤ ${s.max_step ?? (control?.limits?.levers?.[op]?.base_max_step ?? "max")}` : "off"}`);
     return { t, tag: "levers", text: `Auto levers: ${parts.join(", ")}` };
@@ -344,7 +349,7 @@ function serverEventView(e) {
 // A burst of zone or lever clicks is one change: only the last of a kind within 5 s is listed.
 function settledEvents() {
   const list = [...serverEvents.values()].sort((a, b) => a.t_ms - b.t_ms);
-  return list.filter((e, i) => !["levers", "band"].includes(e.kind) ||
+  return list.filter((e, i) => !["levers", "band", "settings"].includes(e.kind) ||
     !list.slice(i + 1).some(n => n.kind === e.kind && n.t_ms - e.t_ms <= 5000));
 }
 const allEvents = () => [...derived, ...settledEvents().map(serverEventView)].sort((a, b) => a.t - b.t);
@@ -411,14 +416,14 @@ on("control", c => {
 
 function zoneOf(mm) {
   if (!isNum(mm) || !controlOk() || !isNum(control.target_mm)) return "none";
-  const [below, above] = bandOf(control), floor = control.limits?.min_width_mm;
+  const [below, above] = bandOf(control), floor = wallsMm();
   if (isNum(floor) && mm < floor) return "walls";
   if (mm < control.target_mm - below - 1e-9) return "below";
   if (mm > control.target_mm + above + 1e-9) return "above";
   return "inside";
 }
 const ZONE_TEXT = { inside: ["ok", "in zone"], below: ["warn", "below zone"], above: ["warn", "above zone"],
-  walls: ["bad", "below 1.30: walls may not touch"], none: ["off", "no target"] };
+  walls: ["bad", "below the walls limit"], none: ["off", "no target"] };
 
 function renderDial() {
   const e = liveEstimate(), dial = $("#dial");
@@ -446,7 +451,7 @@ function renderMeter() {
   const m = $("#zone-meter"), t = controlOk() ? control.target_mm : null, e = liveEstimate();
   m.dataset.empty = isNum(t) ? "" : "1";
   if (!isNum(t)) return;
-  const [below, above] = bandOf(control), floor = control.limits?.min_width_mm;
+  const [below, above] = bandOf(control), floor = wallsMm();
   const lo = Math.min(t - below, isNum(floor) ? floor : t, e ? e.mm : t) - 0.1;
   const hi = Math.max(t + above, e ? e.mm : t) + 0.1;
   const lo5 = Math.floor(lo * 20) / 20, hi5 = Math.ceil(hi * 20) / 20, f = v => `${clamp((v - lo5) / (hi5 - lo5), 0, 1) * 100}%`;
@@ -501,8 +506,11 @@ function renderZone() {
   });
   $("#z-hold").disabled = !up;
   const noise = liveRow()?.noise_mm;
-  const zoneNote = isNum(t) && isNum(noise) && noise > Math.min(below, above) + 1e-9
-    ? `Measurement noise is ±${fmt(noise, 2)} mm, wider than your zone: Auto also holds within the noise.` : "";
+  const walls = wallsMm();
+  const zoneNote = isNum(t) && isNum(walls) && walls > t - below + 1e-9
+    ? `The walls limit ${fmt(walls, 2)} mm is above your zone's min: below it Auto acts at once, with bigger steps.`
+    : isNum(t) && isNum(noise) && noise > Math.min(below, above) + 1e-9
+      ? `Measurement noise is ±${fmt(noise, 2)} mm, wider than your zone: Auto also holds within the noise.` : "";
   if (!$("#zone-msg").dataset.state || $("#zone-msg").dataset.state === "info") {
     $("#zone-msg").textContent = zoneNote;
     $("#zone-msg").dataset.state = zoneNote ? "info" : "";
@@ -543,6 +551,30 @@ document.querySelectorAll("[data-band]").forEach(b => (b.onclick = async () => {
 $("#z-hold").onclick = async () => {
   const r = await postControl({ hold_current: true });
   zoneMsg(r.error ? `Not set: ${r.error}` : "");
+};
+
+const wallsInput = $("#z-walls");
+function renderWalls() {
+  const up = controlOk(), mine = control?.settings?.min_width_mm, base = control?.limits?.defaults?.min_width_mm;
+  wallsInput.disabled = !up;
+  if (!editing.has("walls")) wallsInput.value = isNum(wallsMm()) ? mmText(wallsMm()) : "";
+  wallsInput.closest(".zf").dataset.custom = isNum(mine) ? "1" : "";
+  $("#z-walls-rel").textContent = !up ? "" : isNum(mine) ? (isNum(base) ? `default ${fmt(base, 2)}` : "yours") : "default";
+  $("#legend-walls").textContent = isNum(wallsMm()) ? `${fmt(wallsMm(), 2)} walls` : "walls";
+}
+wallsInput.oninput = () => editing.add("walls");
+wallsInput.onblur = async () => {
+  if (!editing.has("walls")) return;
+  editing.delete("walls");
+  if (wallsInput.validity.badInput) { zoneMsg("Not set: not a number"); return renderWalls(); }
+  const raw = wallsInput.value.trim();
+  const r = await postControl({ settings: { min_width_mm: raw === "" ? null : Number(raw) } });
+  zoneMsg(r.error ? (r.lost ? r.error : `Not set: ${r.error}`) : "");
+  renderWalls();
+};
+wallsInput.onkeydown = e => {
+  if (e.key === "Enter") wallsInput.blur();
+  else if (e.key === "Escape") { editing.delete("walls"); renderWalls(); wallsInput.blur(); }
 };
 
 // ---- Auto switch ----------------------------------------------------------------------------------------------------------
@@ -685,7 +717,7 @@ function renderLoop() {
   $("#loop-mode").textContent = !r.auto ? "advice" : r.dry ? "dry run" : "auto";
   $("#loop-mode").dataset.mode = !r.auto ? "advice" : r.dry ? "dry" : "auto";
   $("#loop-title").textContent = x.title;
-  $("#loop-detail").textContent = [x.detail, x.floor ? "floor rules: below 1.30 Auto acts sooner" : ""].filter(Boolean).join(" · ");
+  $("#loop-detail").textContent = [x.detail, x.floor ? `floor rules: below ${fmt(wallsMm(), 2)} mm Auto acts sooner` : ""].filter(Boolean).join(" · ");
   $("#loop-progress").hidden = x.progress === null;
   if (x.progress !== null) $("#loop-progress").firstElementChild.style.width = `${clamp(x.progress, 0, 1) * 100}%`;
   const said = r.reason || "";  // the controller's own words, unless the detail above already says exactly that
@@ -855,9 +887,81 @@ function renderLevers() {
     : "Auto's limits are unknown until the models are loaded.";
 }
 
+// ---- Auto settings: the operator's values over the deployment's (control_config.OPERATOR has the server's ranges) ------------
+const SETTINGS = [
+  { key: "persist_s", name: "Confirm for", short: "confirm", unit: "s", min: 0, max: 60, step: 1,
+    why: "how long the width must stay outside your zone before Auto acts" },
+  { key: "persist_estimates", name: "Confirm readings", short: "readings", unit: "", min: 1, max: 20, step: 1,
+    why: "and how many width estimates in a row" },
+  { key: "kappa", name: "Step size", short: "step", unit: "%", min: 10, max: 100, step: 5, scale: 100,
+    why: "share of the gap to the target one command tries to close" },
+  { key: "pin_s", name: "Hands off", short: "hands off", unit: "s", min: 60, max: 900, step: 10,
+    why: "after you set a lever by hand, Auto leaves it alone this long" },
+  { key: "min_layer", name: "First Auto layer", short: "from layer", unit: "", min: 1, max: 50, step: 1,
+    why: "Auto acts from this layer on" },
+  { key: "floor_step_factor", name: "Walls step", short: "walls step", unit: "×", min: 1, max: 2, step: 0.1,
+    why: "below the walls limit, Auto's steps may be this many times bigger" },
+];
+const SETTING_BY_KEY = { ...Object.fromEntries(SETTINGS.map(s => [s.key, s])), min_width_mm: { short: "walls", unit: "mm" } };
+const shownValue = (s, v) => (isNum(v) ? round3(v * (s.scale || 1)) : null);
+const settingText = (key, v) => {
+  const s = SETTING_BY_KEY[key];
+  return s ? `${shownValue(s, v)}${s.unit ? ` ${s.unit}` : ""}` : String(v);
+};
+$("#set-rows").replaceChildren(...SETTINGS.map(s => {
+  const el = node("div", "set-row");
+  el.dataset.key = s.key;
+  el.innerHTML = `
+    <label class="set-name" for="set-${s.key}"><span class="silk">${s.name}</span><small>${s.why}</small></label>
+    <input class="lcd" id="set-${s.key}" type="number" min="${s.min}" max="${s.max}" step="${s.step}" inputmode="decimal">
+    <span class="set-unit">${s.unit}</span><span class="set-def"><span class="set-base"></span>
+      <button type="button" class="mini" title="Back to the deployment's value">reset</button></span>
+    <div class="set-out" aria-live="polite"></div>`;
+  return el;
+}));
+const settingEditing = new Set();
+async function commitSetting(s, value) {
+  const el = $(`.set-row[data-key="${s.key}"]`), out = el.querySelector(".set-out");
+  settingEditing.delete(s.key);
+  const r = await postControl({ settings: { [s.key]: value } });
+  out.textContent = r.error ? (r.lost ? r.error : `Not set: ${r.error}`) : "";
+  renderSettings();
+}
+for (const s of SETTINGS) {
+  const el = $(`.set-row[data-key="${s.key}"]`), input = el.querySelector("input");
+  input.oninput = () => settingEditing.add(s.key);
+  input.onblur = () => {
+    if (!settingEditing.has(s.key)) return;
+    if (input.validity.badInput) { settingEditing.delete(s.key); el.querySelector(".set-out").textContent = "Not set: not a number"; return renderSettings(); }
+    const raw = input.value.trim(), v = Number(raw);
+    if (raw !== "" && !(v >= s.min && v <= s.max)) {
+      settingEditing.delete(s.key);
+      el.querySelector(".set-out").textContent = `Not set: ${s.name.toLowerCase()} must be ${s.min}–${s.max}${s.unit ? ` ${s.unit}` : ""}`;
+      return renderSettings();
+    }
+    commitSetting(s, raw === "" ? null : round3(v / (s.scale || 1)));
+  };
+  input.onkeydown = e => {
+    if (e.key === "Enter") input.blur();
+    else if (e.key === "Escape") { settingEditing.delete(s.key); renderSettings(); input.blur(); }
+  };
+  el.querySelector(".mini").onclick = () => commitSetting(s, null);
+}
+function renderSettings() {
+  const up = controlOk(), mine = control?.settings || {}, base = control?.limits?.defaults || {}, now = control?.limits || {};
+  for (const s of SETTINGS) {
+    const el = $(`.set-row[data-key="${s.key}"]`), input = el.querySelector("input");
+    const v = isNum(mine[s.key]) ? mine[s.key] : isNum(base[s.key]) ? base[s.key] : now[s.key];
+    input.disabled = !up;
+    if (!settingEditing.has(s.key)) input.value = isNum(v) ? shownValue(s, v) : "";
+    el.dataset.custom = isNum(mine[s.key]) ? "1" : "";
+    el.querySelector(".set-base").textContent = isNum(mine[s.key]) && isNum(base[s.key]) ? `default ${shownValue(s, base[s.key])}` : "default";
+  }
+}
+
 // ---- event list ------------------------------------------------------------------------------------------------------------
 const TAGS = { auto: "auto", you: "you", outside: "outside", "auto-switch": "auto", zone: "zone", levers: "levers",
-  alarm: "alarm", refused: "not sent" };
+  alarm: "alarm", refused: "not sent", settings: "settings" };
 let shownEvents = "";
 function renderEvents() {
   const list = allEvents().slice(-120).reverse(), sig = list.map(e => `${e.t}${e.text}`).join("|");
@@ -884,9 +988,11 @@ function renderAll() {
   renderDial();
   renderMeter();
   renderZone();
+  renderWalls();
   renderAuto();
   renderLoop();
   renderLevers();
+  renderSettings();
   renderEvents();
   renderModel();
   renderYield();

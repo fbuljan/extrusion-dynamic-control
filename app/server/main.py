@@ -258,7 +258,7 @@ def note_changes(before, after):
     if not callable(fn):
         return
     for kind, keys in (("auto", ("auto",)), ("target", ("target_mm",)), ("band", ("band_below_mm", "band_above_mm")),
-                       ("levers", ("levers",))):
+                       ("levers", ("levers",)), ("settings", ("settings",))):
         if any(before.get(k) != after.get(k) for k in keys):
             try:
                 fn(kind, **{k: after.get(k) for k in keys})
@@ -269,8 +269,8 @@ def note_changes(before, after):
 def apply_control(body):
     try:
         if not isinstance(body, dict):
-            raise ValueError("expected a JSON object with target_mm, auto, hold_current, band_below_mm, band_above_mm "
-                             "and/or levers")
+            raise ValueError("expected a JSON object with target_mm, auto, hold_current, band_below_mm, band_above_mm, "
+                             "levers and/or settings")
         body = dict(body)
         hold = body.pop("hold_current", False)
         if not isinstance(hold, bool):

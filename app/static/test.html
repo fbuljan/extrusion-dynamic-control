@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Test bench</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="app.css?v=0.6.0">
+  <link rel="stylesheet" href="app.css?v=0.6.3">
 </head>
 <body class="bench-page" data-link="offline">
 <header class="topbar">
@@ -33,6 +33,9 @@
 
   <div class="zone" id="zone">
     <div class="zone-fields">
+      <label class="zf zf-walls" title="Below this the walls may not touch: the alarm shows and Auto acts at once, with bigger steps. Empty: the deployment's value">
+        <span class="silk">Walls</span>
+        <input id="z-walls" type="number" step="0.01" min="0.8" max="2" inputmode="decimal" aria-describedby="z-walls-rel"><small id="z-walls-rel"></small></label>
       <label class="zf"><span class="silk">Min</span>
         <input id="z-min" type="number" step="0.01" inputmode="decimal" aria-describedby="z-min-rel"><small id="z-min-rel"></small></label>
       <label class="zf zf-target"><span class="silk">Target</span>
@@ -79,7 +82,7 @@
       <span class="yield mono" id="yield" title="IR frames in the last minute"></span>
       <ul class="legend" aria-label="Legend">
         <li><i class="k-dot"></i>frame</li><li><i class="k-width"></i>width (average)</li><li><i class="k-sigma"></i>± noise</li><li><i class="k-target"></i>target</li>
-        <li><i class="k-zone"></i>your zone</li><li><i class="k-walls"></i>1.30 walls</li><li><i class="k-auto"></i>Auto on</li>
+        <li><i class="k-zone"></i>your zone</li><li><i class="k-walls"></i><span id="legend-walls">walls</span></li><li><i class="k-auto"></i>Auto on</li>
         <li><i class="k-mark k-m-auto"></i>Auto cmd</li><li><i class="k-mark k-m-you"></i>you</li><li><i class="k-mark k-m-out"></i>outside</li>
       </ul>
       <div class="chips" role="group" aria-label="Time window">
@@ -121,6 +124,11 @@
       <p class="lever-note" id="lever-note"></p>
     </section>
 
+    <section class="tuning" aria-label="Auto settings">
+      <div class="rack-head"><span class="silk">Auto settings</span><span class="muted">kept across restarts</span></div>
+      <div id="set-rows"></div>
+    </section>
+
     <section class="events-box" aria-label="Events">
       <div class="rack-head"><span class="silk">Events</span><span class="muted" id="events-count"></span></div>
       <ul class="events" id="events"></ul>
@@ -129,7 +137,7 @@
 </main>
 
 <script src="vendor/chart.umd.min.js"></script>
-<script src="common.js?v=0.6.0"></script>
-<script src="test.js?v=0.6.0"></script>
+<script src="common.js?v=0.6.3"></script>
+<script src="test.js?v=0.6.3"></script>
 </body>
 </html>

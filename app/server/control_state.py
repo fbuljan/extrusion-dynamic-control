@@ -16,8 +16,8 @@ from . import control_config
 log = logging.getLogger(__name__)
 TARGET_MM_RANGE = (0.3, 5.0)
 BAND_MM_RANGE = (0.0, 1.0)
-FIELDS = ("target_mm", "auto", "band_below_mm", "band_above_mm", "levers")
-PERSISTED = ("target_mm", "band_below_mm", "band_above_mm")
+FIELDS = ("target_mm", "auto", "band_below_mm", "band_above_mm", "levers", "settings")
+PERSISTED = ("target_mm", "band_below_mm", "band_above_mm", "settings")
 
 
 def send_enabled():
@@ -81,6 +81,25 @@ def _check_levers(value, current):
     return merged
 
 
+def _check_settings(value, current):
+    """Merged per key into the operator's settings; None drops a key back to the deployment's value."""
+    if not isinstance(value, dict):
+        raise ValueError("settings must be an object")
+    merged = dict(current)
+    for key, v in value.items():
+        if key not in control_config.OPERATOR:
+            raise ValueError(f"{key!r} is not an operator setting (allowed: {', '.join(control_config.OPERATOR)})")
+        if v is None:
+            merged.pop(key, None)
+            continue
+        lo, hi, kind = control_config.OPERATOR[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi or \
+                kind is int and v != int(v):
+            raise ValueError(f"{key} must be {'a whole number' if kind is int else 'a number'} from {lo:g} to {hi:g}")
+        merged[key] = kind(v)
+    return merged
+
+
 CHECKS = {"target_mm": _check_target, "auto": _check_auto, "band_below_mm": _check_band("band_below_mm"),
           "band_above_mm": _check_band("band_above_mm")}
 
@@ -100,7 +119,7 @@ class ControlState:
         self.path = Path(path)
         self.lock = threading.Lock()
         self._values = {"target_mm": None, "auto": False, "band_below_mm": None, "band_above_mm": None,
-                        "levers": default_levers()}
+                        "levers": default_levers(), "settings": {}}
         self._stamp = None
         self.load_error = None
         self.persist_error = None
@@ -128,7 +147,8 @@ class ControlState:
             return {**self._copy(), "target_stamp": self._stamp}
 
     def _copy(self):
-        return {**self._values, "levers": {op: dict(spec) for op, spec in self._values["levers"].items()}}
+        return {**self._values, "levers": {op: dict(spec) for op, spec in self._values["levers"].items()},
+                "settings": dict(self._values["settings"])}
 
     def update(self, new, stamp=None):
         """Validate all fields, apply in memory, persist a changed target or stamp (a failing disk only sets
@@ -138,10 +158,12 @@ class ControlState:
         unknown = sorted(set(new) - set(FIELDS))
         if unknown:
             raise ValueError(f"unknown field {unknown[0]!r}; allowed: {', '.join(FIELDS)}")
-        checked = {k: CHECKS[k](v) for k, v in new.items() if k != "levers"}
+        checked = {k: CHECKS[k](v) for k, v in new.items() if k not in ("levers", "settings")}
         with self.lock:
             if "levers" in new:
                 checked["levers"] = _check_levers(new["levers"], self._values["levers"])
+            if "settings" in new:
+                checked["settings"] = _check_settings(new["settings"], self._values["settings"])
             values, new_stamp = {**self._values, **checked}, self._stamp
             if "target_mm" in checked:
                 new_stamp = _check_stamp(stamp) if checked["target_mm"] is not None else None
@@ -158,7 +180,9 @@ class ControlState:
             data = json.loads(self.path.read_text())
             if not isinstance(data, dict):
                 raise ValueError("not a JSON object")
-            loaded = {key: CHECKS[key](data[key]) for key in PERSISTED if key in data}  # all or nothing
+            loaded = {key: CHECKS[key](data[key]) for key in PERSISTED if key in data and key != "settings"}  # all or nothing
+            if "settings" in data:
+                loaded["settings"] = _check_settings(data["settings"], {})
             self._values = {**self._values, **loaded}
             if "target_mm" in loaded:
                 self._stamp = _check_stamp(data.get("target_stamp")) if loaded["target_mm"] is not None else None
@@ -177,7 +201,7 @@ class ControlState:
     def _write(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
-        data = {key: self._values[key] for key in PERSISTED if key == "target_mm" or self._values[key] is not None}
+        data = {key: self._values[key] for key in PERSISTED if key == "target_mm" or self._values[key] not in (None, {})}
         if self._stamp:
             data["target_stamp"] = self._stamp
         with open(tmp, "w") as f:

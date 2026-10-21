@@ -585,6 +585,9 @@ class RogueController:
     def tune(self, levers):
         self.real.tune(levers)
 
+    def configure(self, settings):
+        self.real.configure(settings)
+
     def band_mm(self, band):
         return self.real.band_mm(band)
 
@@ -1002,6 +1005,19 @@ def test_every_frame_is_a_sample_and_every_step_carries_the_models_view(sim):
     assert flow["up"] > 0 > flow["down"] and speed["up"] is None and speed["down"] > 0, "speed sits at its 100 % bound"
     assert [m["t_ms"] for m in s.emitted if m["type"] == "trace"] == [r["t_ms"] for r in trace["rows"]]
     json.dumps(trace, allow_nan=False)
+
+
+def test_the_operators_settings_reach_the_controller_at_the_next_step(sim):
+    s = sim(auto=True, target=1.35)
+    s.run(2)
+    assert s.pipeline.trace()["rows"][-1]["min_width_mm"] == 1.30
+    s.control.update({"settings": {"min_width_mm": 1.45, "persist_s": 3}})
+    s.run(1)
+    assert s.pipeline.trace()["rows"][-1]["min_width_mm"] == 1.45
+    assert s.pipeline.controller.cfg["persist_s"] == 3.0 and s.pipeline.limits()["defaults"]["min_width_mm"] == 1.30
+    s.control.update({"settings": {"min_width_mm": None}})
+    s.run(1)
+    assert s.pipeline.trace()["rows"][-1]["min_width_mm"] == 1.30 and s.pipeline.controller.cfg["persist_s"] == 3.0
 
 
 def test_the_trace_keeps_fifteen_minutes(sim):
