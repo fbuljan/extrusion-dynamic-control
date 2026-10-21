@@ -22,6 +22,12 @@ services:
       LINE_WIDTH_MM: ${LINE_WIDTH_MM:-1.5}
       # Second key for Auto sends: only "1" lets the controller send; set it in the shell for that one build.
       CONTROL_SEND_ENABLED: ${CONTROL_SEND_ENABLED:-0}
+      # Seconds Auto leaves an operator's change alone (controller default 300, floor 60).
+      CONTROL_PIN_S: ${CONTROL_PIN_S:-300}
+      # First layer Auto may act on (controller default 6).
+      CONTROL_MIN_LAYER: ${CONTROL_MIN_LAYER:-6}
+      # Step multiple Auto may take below 1.30 mm when widening (controller default 1.0, at most 2.0; D48).
+      CONTROL_FLOOR_STEP_FACTOR: ${CONTROL_FLOOR_STEP_FACTOR:-1.0}
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}

@@ -29,6 +29,13 @@ DEFAULTS = {
     "persist_estimates": 5,
     "persist_gap_s": 30.0,
     "min_width_mm": 1.30,        # below this the walls of a part may not touch: an alarm, not a hold
+    # Below min_width_mm a real narrowing outweighs the risk of chasing noise: Auto acts on estimates down to this
+    # confidence, ignores the noise band, and may take steps up to floor_step_factor x each lever's max_step (2x
+    # ratcheted the bead wide on 3x frame noise, D48).
+    "floor_min_confidence": 0.45,
+    "floor_step_factor": 1.0,
+    "floor_hold_s": 20.0,        # the floor rules stay on this long after the last estimate below it (noise bounces),
+    "floor_release_mm": 0.05,    # while the estimate stays under min_width_mm + this
     "group_rule": "two_groups",
     "residual_weight": 20.0,
     "step_penalty": 0.5,
@@ -61,7 +68,8 @@ FLOORS = {"min_spacing_ms": (2000, None), "max_failures": (1, 3), "foreign_hold_
           "min_confidence": (0.3, None), "settle_samples": (3, None),
           "widen_response_ratio": (0.3, 1.0), "persist_s": (0, None), "persist_estimates": (1, None),
           "persist_gap_s": (1, None),
-          "min_width_mm": (0.8, 2.0)}
+          "min_width_mm": (0.8, 2.0), "floor_min_confidence": (0.3, None),
+          "floor_step_factor": (1.0, 2.0), "floor_hold_s": (0, 60), "floor_release_mm": (0, 0.2)}
 
 
 def load(overrides=None):
@@ -103,12 +111,16 @@ def load(overrides=None):
             raise ValueError(f"{op} tolerance must be within (0, max_step / 2]")
     if not 0 < cfg["kappa"] <= 1:
         raise ValueError("kappa must be within (0, 1]")
+    if cfg["floor_min_confidence"] > cfg["min_confidence"]:
+        raise ValueError("floor_min_confidence must be <= min_confidence")
     return cfg
 
 
 def limits(cfg):
     """Read-only, JSON-safe view of what the controller may do."""
     levers = cfg["levers"] if cfg["mode"] == "model" else {"flow_percent": cfg["levers"]["flow_percent"]}
-    return {"mode": cfg["mode"], "min_spacing_ms": cfg["min_spacing_ms"],
+    return {"mode": cfg["mode"], "min_spacing_ms": cfg["min_spacing_ms"], "pin_s": cfg["pin_s"],
+            "min_layer": cfg["min_layer"], "min_width_mm": cfg["min_width_mm"],
+            "floor_step_factor": cfg["floor_step_factor"],
             "levers": {op: {"min": s["bounds"][0], "max": s["bounds"][1], "max_step": s["max_step"]}
                        for op, s in levers.items()}}

@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from . import control_config, model_files
 from .bridge import DATA_DIR, OPERATIONS, Bridge, now_ms
 from .control_state import TARGET_MM_RANGE, ControlState, send_enabled
-from .pipeline import Pipeline, env_settings, load_models
+from .pipeline import Pipeline, env_controller, env_settings, load_models
 from .store import Store
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -76,7 +76,8 @@ def open_store():
 
 def start_pipeline(store):
     try:
-        pipeline = Pipeline(bridge, control, store, **load_models(), settings=env_settings(), emit=bridge._emit)
+        pipeline = Pipeline(bridge, control, store, **load_models(), controller_config=env_controller(),
+                            settings=env_settings(), emit=bridge._emit)
     except Exception:  # noqa: BLE001 - the monitor and manual controls must come up even if the pipeline can't
         log.exception("width pipeline failed to start; running without it")
         return None

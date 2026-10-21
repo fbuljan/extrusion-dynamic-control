@@ -111,6 +111,40 @@ def env_settings(environ=None):
     return out
 
 
+WIDENS = {"flow_percent": 1, "speed_override_percent": -1, "nozzle_temperature_c": 1}  # direction that widens the bead
+
+
+def _floor_widening(decision, current):
+    """The floor rules' bigger step is for widening a bead narrower than wanted only."""
+    action, error = decision.action or {}, decision.error_mm
+    sign = WIDENS.get(action.get("operation"))
+    return bool(getattr(decision, "floor", False)) and is_number(error) and error > 0 and sign is not None and \
+        is_number(action.get("value")) and (action["value"] - current) * sign > 0
+
+
+def env_controller(environ=None):
+    """Controller overrides from CONTROL_PIN_S (seconds an operator's change is left alone), CONTROL_MIN_LAYER (first
+    layer Auto may act on) and CONTROL_FLOOR_STEP_FACTOR (step multiple under the floor rules, 1-2); a bad value keeps
+    that setting's default."""
+    environ = os.environ if environ is None else environ
+    overrides = {}
+    for var, key, cast in (("CONTROL_PIN_S", "pin_s", float), ("CONTROL_MIN_LAYER", "min_layer", int),
+                           ("CONTROL_FLOOR_STEP_FACTOR", "floor_step_factor", float)):
+        raw = environ.get(var)
+        if raw is None:
+            continue
+        try:
+            value = cast(raw)
+            if not math.isfinite(value) or key == "min_layer" and value < 1:
+                raise ValueError
+            control_config.load({key: value})
+        except ValueError:
+            log.warning("ignoring %s=%r: keeping the default %s", var, raw, control_config.DEFAULTS[key])
+            continue
+        overrides[key] = value
+    return overrides or None
+
+
 def load_models(models_dir=None):
     """Fitted models by Pipeline keyword; a missing or unloadable one is None, so the app reports "no model"."""
     base = Path(models_dir) if models_dir is not None else model_files.MODELS_DIR
@@ -578,8 +612,9 @@ class Pipeline:
         current = self._inputs(now)[0].get(op)
         if not is_number(current):
             return f"no fresh readback for {op}"
-        if abs(value - current) > lever["max_step"] + 1e-9:
-            return f"{op} {value} is more than {lever['max_step']:g} from the readback {current:g}"
+        step = lever["max_step"] * (self.controller.cfg["floor_step_factor"] if _floor_widening(decision, current) else 1)
+        if abs(value - current) > step + 1e-9:
+            return f"{op} {value} is more than {step:g} from the readback {current:g}"
         if self._last_sent_ms is not None and now - self._last_sent_ms < self.controller.cfg["min_spacing_ms"]:
             return "less than the minimum spacing since the last command"
         if not self.gate_open(self.clock()):

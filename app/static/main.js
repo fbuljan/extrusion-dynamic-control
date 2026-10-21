@@ -425,20 +425,27 @@ function decisionLine(d) {
   const narrow = narrowMatch ? `${narrowMatch[1]}: walls may not touch` : "";
   const rest = narrowMatch ? raw.slice(narrowMatch[0].length) : raw;  // a latched alarm behind it stays an alarm
   const alarm = /^alarm:/.test(rest);
-  const reason = rest.replace(/^alarm:\s*/, "");
+  const floorRules = /^floor rules:\s*/.test(rest);  // acted under the floor rules (D48), also in the 1.30-1.35 mm zone
+  const reason = rest.replace(/^alarm:\s*/, "").replace(/^floor rules:\s*/, "");
   const a = d.action;
   const act = a ? move(a.operation, chosenOf(d)?.from, a.value) : "";
   if (a && d.sent === false) {  // refused at the last moment: the action did not happen, so it must not read like it did
     return { text: `not sent · ${reason.replace(/^not sent:\s*/, "") || "refused"}`, alarm, narrow, notSent: true, intended: act };
   }
-  const parts = alarm ? ["alarm", reason] : a ? [act, d.hold ? "hold" : "", d.hold ? reason : ""] : [d.hold ? "hold" : "", reason || "no action"];
+  const parts = alarm ? ["alarm", reason] : a ? [act, floorRules ? "floor rules" : "", d.hold ? "hold" : "", d.hold ? reason : ""] : [d.hold ? "hold" : "", reason || "no action"];
   return { text: parts.filter(Boolean).join(" · "), alarm, narrow, notSent: false, intended: "" };
+}
+
+// "±10", or "±10 (±20 below 1.30 mm)" when the floor rules may take bigger steps (D48)
+function stepText(l, limits) {
+  const f = limits?.floor_step_factor, floor = isNum(f) && f > 1 && isNum(limits.min_width_mm);
+  return `±${l.max_step}${floor ? ` (±${+(l.max_step * f).toFixed(2)} below ${fmt(limits.min_width_mm, 2)} mm)` : ""}`;
 }
 
 function limitsLine(limits) {
   const levers = limits?.levers;
   if (!levers) return "";
-  const each = Object.entries(levers).map(([op, l]) => `${opName(op)} ${l.min}–${l.max} ±${l.max_step}`);
+  const each = Object.entries(levers).map(([op, l]) => `${opName(op)} ${l.min}–${l.max} ${stepText(l, limits)}`);
   return `${limits.mode ? `${limits.mode} mode · ` : ""}limits ${each.join(" · ")}`;
 }
 
@@ -557,7 +564,7 @@ function renderLevers() {
     pin.textContent = show ? "pinned" : "";
     pin.title = !show ? "" : `Set from outside${isNum(p.value) ? ` to ${fmt(p.value, digitsOf(c.op))}` : ""}; the controller leaves it alone${
       secs > 0 ? ` for ${Math.floor(secs / 60)}:${String(Math.floor(secs % 60)).padStart(2, "0")} more` : ""}`;
-    strip.querySelector(".strip-name").title = l ? `${c.title}\nAuto keeps it within ${l.min}–${l.max}, at most ±${l.max_step} per command` : c.title;
+    strip.querySelector(".strip-name").title = l ? `${c.title}\nAuto keeps it within ${l.min}–${l.max}, at most ${stepText(l, control.limits)} per command` : c.title;
   }
 }
 

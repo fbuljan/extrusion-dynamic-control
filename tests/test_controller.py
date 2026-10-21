@@ -13,6 +13,7 @@ from tools.sim.plant import T0_MS, Gateway, Plant, PlantParams, Sensor, SensorPa
 
 NOMINAL_MM_S = 20.0  # the sim has no absolute speed; this maps its speed % to the camera model's mm/s
 OPS = ("flow_percent", "speed_override_percent", "nozzle_temperature_c")
+WIDENS = {"flow_percent": 1, "speed_override_percent": -1, "nozzle_temperature_c": 1}  # the way that widens the bead
 
 
 # sim loop: what the pipeline does every second, against the bench ---------------------------------------------------
@@ -265,6 +266,8 @@ def safety_violations(out, config=None):
     """Every sent command against bounds, step limit, rounding, spacing, settling, failures, gate and Auto."""
     cfg, problems, loop = control_config.load(config), [], out["loop"]
     by_time = {d.t_ms: (gate, auto) for d, _, gate, auto in loop.decisions}
+    # the floor rules' bigger step (D48): only on the tick it was decided, widening a bead narrower than wanted
+    floor_at = {d.t_ms for d, *_ in loop.decisions if d.floor and d.error_mm is not None and d.error_mm > 0}
     columns = dict(zip(OPS, ("flow_percent", "speed_override_percent", "nozzle_target_c")))
     confirmed = {int(q) for q, st in zip(out["result_sequence"], out["result_state"]) if st == "setting_confirmed"}
     seq_of = dict(zip(np.round(out["action_t_s"] * 1000).astype(int), out["action_sequence"]))
@@ -280,7 +283,8 @@ def safety_violations(out, config=None):
         lo, hi = spec["bounds"]
         if not lo <= value <= hi:
             problems.append(f"{t_s}: {op}={value} outside {lo}-{hi}")
-        if abs(value - current) > spec["max_step"] + 1e-9:
+        widening = t_ms in floor_at and (value - current) * WIDENS[op] > 0
+        if abs(value - current) > spec["max_step"] * (cfg["floor_step_factor"] if widening else 1) + 1e-9:
             problems.append(f"{t_s}: {op} step {current}->{value}")
         if value != round(value):
             problems.append(f"{t_s}: {op}={value} not rounded")
@@ -322,6 +326,7 @@ class Rig:
         self.t, self.target, self.auto, self.gate = T0_MS, target, auto, True
         self.sp, self.measured, self.context = dict(SETPOINTS), {"nozzle_c": 220.0, "extruding": True}, {"layer": 10}
         self.ceiling = None  # the camera model's ceiling the estimate reports
+        self.relative = False  # the estimate is in a relative camera model's units
 
     def step(self, mm=None, dt_ms=1000, sigma=0.02, n=10, age_ms=500, confidence=0.9, since_ms="pipeline",
              per_group=None, groups_active=1):
@@ -330,7 +335,8 @@ class Rig:
         est = None if mm is None else {"mm": mm, "sigma_mm": sigma, "n": n, "age_ms": age_ms, "confidence": confidence,
                                        "per_group": per_group or {"1": {"mm": mm, "sigma_mm": sigma, "n": n}},
                                        "groups_active": groups_active, "since_ms": since, "ceiling_mm": self.ceiling,
-                                       "at_ceiling": self.ceiling is not None and mm >= self.ceiling - 0.05}
+                                       "at_ceiling": self.ceiling is not None and mm >= self.ceiling - 0.05,
+                                       "relative": self.relative}
         return self.c.step(self.t, est, self.target, dict(self.sp), dict(self.measured), dict(self.context),
                            self.gate, self.auto)
 
@@ -527,7 +533,7 @@ def test_below_the_minimum_width_the_walls_alarm_leads_and_the_controller_still_
     assert r.step(1.25).reason == BELOW + confirming(0.20, 0, 1)
     d = r.act(1.25)
     assert d.action["operation"] == "flow_percent" and not d.hold  # an alarm on the bead, not a hold
-    assert d.reason == f"{BELOW}flow 100 % -> {d.action['value']}"
+    assert d.reason == f"{BELOW}floor rules: flow 100 % -> {d.action['value']}" and d.floor
     json.dumps(d.to_dict())
     advice = Rig(target=1.45, auto=False).act(1.25)
     assert advice.action == d.action and advice.reason == d.reason and not advice.hold
@@ -627,6 +633,86 @@ def test_melt_limited_flow_loses_on_residual_not_by_rule():
     assert r.act(1.29).action["operation"] == "nozzle_temperature_c"
 
 
+def test_below_the_floor_auto_acts_inside_the_noise_band_and_on_lower_confidence():
+    # 0.25 mm short with sigma 0.15 (band 0.30) and confidence 0.47: the cube's infill, its clog dip. Above 1.30 mm: hold.
+    above = Rig(target=1.60).armed(1.35)
+    assert above.act(1.35, sigma=0.15).reason.startswith("on target")
+    assert above.act(1.35, sigma=0.02, confidence=0.47).reason == "low confidence (0.47)"
+    below = Rig(target=1.50).armed(1.25)
+    d = below.act(1.25, sigma=0.15, confidence=0.47)
+    assert d.action and d.floor and d.error_mm > 0 and d.reason.startswith(BELOW + "floor rules: ")
+    # still not on noise: under floor_min_confidence, or narrower than the target only above the floor
+    assert Rig(target=1.50).armed(1.25).act(1.25, confidence=0.4).reason == "low confidence (0.40)"
+    assert not Rig(target=1.20).armed(1.25).act(1.25, sigma=0.15).action
+
+
+def test_below_the_floor_steps_double_only_when_configured_and_only_there():
+    melty = StubPrinterModel(melt_width_mm=MELTY)
+    one = Rig(melty, target=1.50).armed(1.10).act(1.10)  # default factor 1: 2x ratcheted the bead wide on noise
+    assert one.floor and abs(one.action["value"] - SETPOINTS[one.action["operation"]]) <= 10
+    big = Rig(melty, config={"floor_step_factor": 2.0}, target=1.50).armed(1.10).act(1.10)
+    assert big.floor and 10 < abs(big.action["value"] - SETPOINTS[big.action["operation"]]) <= 20
+    small = Rig(melty, config={"floor_step_factor": 2.0}, target=1.50).armed(1.36).act(1.36)
+    assert not small.floor and abs(small.action["value"] - SETPOINTS[small.action["operation"]]) <= 10
+    assert Rig(melty, target=1.50).armed(1.10).act(1.10, confidence=0.4).action is None
+    assert control_config.limits(control_config.load({"floor_step_factor": 2.0}))["floor_step_factor"] == 2.0
+
+
+def test_no_floor_rules_for_a_relative_model_or_at_a_ceiling():
+    r = Rig(target=1.50)
+    est = {"mm": 1.20, "sigma_mm": 0.15, "n": 10, "age_ms": 500, "confidence": 0.47}
+    assert r.c.walls_alarm(est) and not r.c.walls_alarm({**est, "relative": True})
+    assert not r.c.walls_alarm({**est, "at_ceiling": True}) and not r.c.walls_alarm({**est, "confidence": 0.4})
+    # in a control step: 0.25 mm short inside a 0.30 mm band acts only by the floor rules
+    assert Rig(target=1.50).armed(1.25).act(1.25, sigma=0.15).floor
+    relative = Rig(target=1.50)
+    relative.relative = True
+    d = relative.armed(1.25).act(1.25, sigma=0.15)
+    assert d.action is None and d.reason.startswith("on target") and not relative.c._floor
+    ceiling = Rig(target=1.25)
+    ceiling.ceiling = 1.28  # reads 1.24 at its ceiling: the bead may be wider
+    ceiling.target = 1.28
+    d = ceiling.armed(1.24).act(1.24, sigma=0.15)
+    assert d.action is None and not d.reason.startswith("alarm: below") and not ceiling.c._floor
+
+
+def test_the_floor_rules_hold_20_s_after_the_last_dip_while_under_135_mm():
+    r = Rig(config=NOW, target=1.45).armed(1.45)
+    r.step(1.28)  # a dip below 1.30 mm
+    flags = []
+    for _ in range(20):
+        r.step(1.33)
+        flags.append(r.c._floor)
+    assert flags == [True] * 19 + [False]  # floor_hold_s after the last estimate below the floor
+    r.step(1.28)
+    r.step(1.36)
+    assert not r.c._floor  # at or above min_width_mm + floor_release_mm: off at once
+    r.step(1.33)
+    assert r.c._floor  # the hold from the dip still runs
+    r.target = 1.46  # a new target: what was decided for the old one goes
+    r.step(1.33)
+    assert not r.c._floor
+
+
+def test_the_floor_hold_ends_with_a_settings_change_and_survives_auto_rearmed():
+    r = Rig(config=NOW, target=1.45).armed(1.45)
+    d = r.step(1.28)
+    assert d.action and d.floor
+    r.send(d)
+    r.sp[d.action["operation"]] = float(d.action["value"])
+    r.c.note_result(1, "setting_confirmed", r.t)
+    r.step(1.28)  # the readback shows it: beads laid before it say nothing about after it
+    assert r.c._floor_until == -math.inf
+    r = Rig(config=NOW, target=1.45).armed(1.45)
+    r.step(1.28)
+    until = r.c._floor_until
+    r.auto = False
+    r.step(1.33)
+    r.auto = True
+    r.step(1.33)
+    assert r.c._floor_until == until and r.c._floor
+
+
 def test_rounding_bounds_and_step_limits_hold_for_any_state():
     rng = np.random.default_rng(0)
     cfg = control_config.load()
@@ -637,7 +723,7 @@ def test_rounding_bounds_and_step_limits_hold_for_any_state():
         r.sp = {"flow_percent": float(rng.uniform(50, 150)), "speed_override_percent": float(rng.uniform(40, 120)),
                 "nozzle_temperature_c": float(rng.uniform(190, 250))}
         r.measured["nozzle_c"] = r.sp["nozzle_temperature_c"] + rng.normal(0, 3)
-        mm = rng.uniform(0.8, 2.4)
+        mm, target = rng.uniform(0.8, 2.4), r.target
         r.step(mm)
         d = r.step(mm)
         if d.action is None:
@@ -645,7 +731,9 @@ def test_rounding_bounds_and_step_limits_hold_for_any_state():
         op, value = d.action["operation"], d.action["value"]
         lo, hi = cfg["levers"][op]["bounds"]
         assert op in control_config.LEVERS and value == round(value) and lo <= value <= hi
-        assert abs(value - r.sp[op]) <= cfg["levers"][op]["max_step"] + 1e-9
+        floor = mm < min(cfg["min_width_mm"], target)  # below the walls floor and narrower than wanted
+        step = cfg["levers"][op]["max_step"] * (cfg["floor_step_factor"] if floor else 1)
+        assert abs(value - r.sp[op]) <= step + 1e-9
         assert mode == "model" or op == "flow_percent"
 
 
@@ -656,7 +744,10 @@ def test_rounding_bounds_and_step_limits_hold_for_any_state():
     {"levers": {"pressure_advance_seconds": {"bounds": (0, 1), "max_step": 0.1, "cost": 1, "effect_delay_s": 0,
                                             "tolerance": 0.01}}},
     {"levers": {"nozzle_temperature_c": {"bounds": (180, 250)}}}, {"no_such_setting": 1},
-    {"mode": "fallback", "levers": {"flow_percent": None}}, {"group_rule": "agree"}])
+    {"mode": "fallback", "levers": {"flow_percent": None}}, {"group_rule": "agree"},
+    {"floor_min_confidence": 0.25}, {"floor_min_confidence": 0.55}, {"floor_min_confidence": math.nan},
+    {"floor_step_factor": 0.9}, {"floor_step_factor": 2.5}, {"floor_step_factor": math.inf},
+    {"floor_hold_s": -1}, {"floor_hold_s": 61}, {"floor_release_mm": -0.01}, {"floor_release_mm": 0.25}])
 def test_config_refuses_unsafe_or_unknown_settings(bad):
     with pytest.raises(ValueError):
         Controller(StubPrinterModel(), bad)

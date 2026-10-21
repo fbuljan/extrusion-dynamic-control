@@ -10,11 +10,15 @@ Works in increments: it asks the printer model which setpoint changes the width 
 from the current setpoints, so a constant model bias cancels. At most one command in flight: after a command nothing
 else is sent until beads deposited after its effect delay have been measured (`settle_samples` of them). A rolling
 median wanders, so the error must also stay outside the band on one side for `persist_s` (over `persist_estimates`
-estimates) before anything is proposed; ticks without a usable estimate pause that count instead of resetting it.
+estimates) before anything is proposed; ticks without a usable estimate count as time, not as estimates, until the
+last estimate off target is `persist_gap_s` old.
 A camera with a ceiling is blind above its knee, and a drifted IR baseline can put that blind plateau anywhere below
 it: no target above the ceiling, no widening at it, and every widening step goes from a settled width and must show its
 effect (each view against itself) before the next one, or widening latches until Auto is re-armed. Without a ceiling
-widening steps go like narrowing ones. A confident estimate below `min_width_mm` leads every reason with an alarm.
+widening steps go like narrowing ones. A usable estimate below `min_width_mm` leads every reason with an alarm and
+switches on the floor rules (D48) while the bead is narrower than wanted: act inside the noise band, on confidence down
+to `floor_min_confidence`, with steps up to `floor_step_factor` x max_step (1 by default), for `floor_hold_s` after the
+last estimate below the floor while under `min_width_mm` + `floor_release_mm`. Such decisions say "floor rules: ".
 """
 import math
 import statistics
@@ -77,6 +81,7 @@ class Decision:
     predicted_mm: float | None  # estimate after the action settles, by the model
     candidates: list = field(default_factory=list)
     hold: bool = True
+    floor: bool = False  # acted under the floor rules (estimate below min_width_mm): steps up to floor_step_factor x
 
     def to_dict(self):
         return asdict(self)
@@ -111,6 +116,8 @@ class Controller:
         self._last_action_ms = None
         self._unreachable_steps = 0
         self._off = None  # the current run of estimates off target on one side: {"sign", "since_ms", "last_ms", "n"}
+        self._floor = False  # the floor rules apply this tick (see _step)
+        self._floor_until = -math.inf
         self._feed, self._feed_ms = 1.0, None  # anchor: estimate / model width, smoothed
 
     # caller notes ---------------------------------------------------------------------------------------------------
@@ -174,6 +181,7 @@ class Controller:
         if change:  # estimates of beads laid before a change say nothing about the width after it
             self._recent.clear()
             self._off = None
+            self._floor_until = -math.inf
 
     def _forget(self, op, value):
         tol = self.cfg["levers"][op]["tolerance"]
@@ -326,20 +334,26 @@ class Controller:
         d.reason = lead_with(self.walls_alarm(estimate), d.reason)  # an alarm on the bead, not a hold
         return d
 
-    def walls_alarm(self, estimate):
-        """The alarm for a usable estimate below min_width_mm, or None: not in a relative camera model's units, nor at a
+    def _usable(self, estimate):
+        """Fresh and confident enough for the floor rules, in real mm: not a relative camera model's units, nor at a
         ceiling (the bead may be wider than it reads)."""
         cfg = self.cfg
-        if estimate is None or estimate.get("relative") or estimate.get("at_ceiling") or \
-                not all(_finite(estimate.get(k)) for k in ("mm", "confidence", "age_ms")) or \
-                estimate["age_ms"] > cfg["max_estimate_age_ms"] or estimate["confidence"] < cfg["min_confidence"] or \
-                estimate["mm"] >= cfg["min_width_mm"]:
-            return None
-        return f"alarm: below {cfg['min_width_mm']:.2f} mm (walls may not touch)"
+        return not (estimate is None or estimate.get("relative") or estimate.get("at_ceiling") or
+                    not all(_finite(estimate.get(k)) for k in ("mm", "confidence", "age_ms")) or
+                    estimate["age_ms"] > cfg["max_estimate_age_ms"] or estimate["confidence"] < cfg["floor_min_confidence"])
+
+    def _below_floor(self, estimate):
+        """A usable estimate under min_width_mm: the walls alarm shows and Auto acts on it by the floor rules."""
+        return self._usable(estimate) and estimate["mm"] < self.cfg["min_width_mm"]
+
+    def walls_alarm(self, estimate):
+        """The alarm for an estimate below min_width_mm, or None."""
+        return f"alarm: below {self.cfg['min_width_mm']:.2f} mm (walls may not touch)" if self._below_floor(estimate) else None
 
     def _step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto):
         cfg = self.cfg
         mode = "auto" if auto else "advise"
+        self._floor = False
         if auto and not self._auto:
             self._arm(now_ms)
         self._auto = auto
@@ -355,8 +369,16 @@ class Controller:
         if target_mm is not None and target_mm != self._target:
             self._refused.clear()
             self._target = target_mm
+            self._floor_until = -math.inf
         self._settle(now_ms, estimate)
         error = target_mm - estimate["mm"] if target_mm is not None and estimate is not None else None
+        # Below the floor (beads laid since the last change), or just back above it (noise), while still narrower than
+        # wanted on a usable estimate.
+        fresh = self._since is None or estimate is not None and (estimate.get("since_ms") or -math.inf) >= self._since
+        if fresh and self._below_floor(estimate):
+            self._floor_until = now_ms + cfg["floor_hold_s"] * 1000
+        self._floor = error is not None and error > 0 and now_ms < self._floor_until and self._usable(estimate) and \
+            estimate["mm"] < cfg["min_width_mm"] + cfg["floor_release_mm"]
 
         def hold(reason, candidates=(), predicted=None):
             return Decision(now_ms, mode, None, reason, error, predicted, list(candidates), True)
@@ -386,7 +408,7 @@ class Controller:
             gap = "no width estimate"
         elif estimate["age_ms"] > cfg["max_estimate_age_ms"]:
             gap = "width estimate stale"
-        elif estimate["confidence"] < cfg["min_confidence"]:
+        elif estimate["confidence"] < cfg["min_confidence"] and not self._floor:
             gap = f"low confidence ({estimate['confidence']:.2f})"
         if gap:
             return pause(gap)
@@ -424,7 +446,7 @@ class Controller:
         if self._last_action_ms is not None and now_ms - self._last_action_ms < cfg["min_spacing_ms"]:
             return hold("spacing")
         band = max(cfg["deadband_mm"], cfg["sigma_factor"] * estimate["sigma_mm"])
-        if abs(error) <= band:
+        if abs(error) <= band and not self._floor:
             self._unreachable_steps, self._streak = 0, None
             if at_ceiling:
                 seen = min(estimate["mm"], ceiling)  # the bead is at least this wide, maybe wider
@@ -488,7 +510,9 @@ class Controller:
         else:
             self._advice.append((action["operation"], action["value"], now_ms, best["predicted_change_mm"], before))
         reason = what if auto or gate_open else f"{what} (gate closed)"
-        return Decision(now_ms, mode, action, reason, error, predicted, candidates, False)
+        if self._floor:
+            reason = f"floor rules: {reason}"
+        return Decision(now_ms, mode, action, reason, error, predicted, candidates, False, self._floor)
 
     def _settled(self, now_ms, estimate):
         """The heater has been on target and LEVEL_S of estimates since the last change show no trend: their last
@@ -599,7 +623,8 @@ class Controller:
     def _window(self, op, value):
         spec = self.levers[op]
         lo, hi = spec["bounds"]
-        return max(lo, value - spec["max_step"]), min(hi, value + spec["max_step"])
+        step = spec["max_step"] * (self.cfg["floor_step_factor"] if self._floor else 1)
+        return max(lo, value - step), min(hi, value + step)
 
     def _within_limits(self, action, current):
         """Last line of defence: an operation, value or step outside the configured limits is never returned."""

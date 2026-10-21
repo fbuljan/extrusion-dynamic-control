@@ -47,6 +47,7 @@ RECOVERED_WITHIN_S = 120
 ABSOLUTE_BOUNDS = {"flow_percent": (70, 130), "speed_override_percent": (60, 100), "nozzle_temperature_c": (190, 250)}
 ABSOLUTE_STEP = {"flow_percent": 10, "speed_override_percent": 10, "nozzle_temperature_c": 5}
 ABSOLUTE_SPACING_S = 2.0
+WIDENS = {"flow_percent": 1, "speed_override_percent": -1, "nozzle_temperature_c": 1}  # the way that widens the bead
 DISTURBED_AT_S = 60
 SEEDS = range(5)
 DB_FILES = {"prototype.db", "prototype.db-wal", "prototype.db-shm", "control.json"}
@@ -307,6 +308,9 @@ def reversals_per_5min(out, t0, band=DEADBAND_MM):
 def safety_problems(out, rig):
     """Every published request: allowed lever, in bounds, one step, whole number, spaced, settled, admissible."""
     cfg, problems, previous, seen = rig.pipeline.controller.cfg, [], None, Counter()
+    # the one sanctioned exception to the step limits (D48): a floor-rules decision widening a bead narrower than
+    # wanted, sent on the tick it was decided
+    floor_at = {t for t, d, *_ in getattr(rig, "ticks", ()) if d.get("floor") and (d.get("error_mm") or 0) > 0}
     sequences = [r["request"]["sequence"] for r in rig.requests]
     if sequences != sorted(set(sequences)):
         problems.append(f"sequences not strictly increasing: {sequences}")
@@ -323,7 +327,8 @@ def safety_problems(out, rig):
             problems.append(f"{t_s}: {op}={value} outside {spec['bounds']}")
         if not ABSOLUTE_BOUNDS[op][0] <= value <= ABSOLUTE_BOUNDS[op][1]:
             problems.append(f"{t_s}: {op}={value} outside the absolute limits {ABSOLUTE_BOUNDS[op]}")
-        if abs(value - now) > min(spec["max_step"], ABSOLUTE_STEP[op]) + 1e-9:
+        floor = r["t_ms"] in floor_at and (value - now) * WIDENS[op] > 0
+        if abs(value - now) > min(spec["max_step"], ABSOLUTE_STEP[op]) * (cfg["floor_step_factor"] if floor else 1) + 1e-9:
             problems.append(f"{t_s}: {op} step {now}->{value}")
         if value != round(value):
             problems.append(f"{t_s}: {op}={value} not rounded")

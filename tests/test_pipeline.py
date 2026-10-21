@@ -567,8 +567,8 @@ def test_a_manual_send_within_2_s_of_an_auto_send_is_refused(sim):
 
 # the last check before a send, against a controller that misbehaves ------------------------------------------------
 class RogueController:
-    def __init__(self, real, action, hold=False):
-        self.real, self.action, self.hold = real, action, hold
+    def __init__(self, real, action, hold=False, floor=False, error_mm=None):
+        self.real, self.action, self.hold, self.floor, self.error_mm = real, action, hold, floor, error_mm
         self.levers, self.cfg = real.levers, real.cfg
         self.sent = []
 
@@ -576,7 +576,8 @@ class RogueController:
         return None
 
     def step(self, now_ms, estimate, target_mm, setpoints, measured, context, gate_open, auto):
-        return Decision(now_ms, "auto" if auto else "advise", self.action, "rogue", None, None, [], self.hold)
+        return Decision(now_ms, "auto" if auto else "advise", self.action, "rogue", self.error_mm, None, [], self.hold,
+                        self.floor)
 
     def walls_alarm(self, estimate):
         return self.real.walls_alarm(estimate)
@@ -655,6 +656,26 @@ def test_the_walls_alarm_leads_the_pipelines_own_overrides(sim, monkeypatch, tmp
     s.flow, s.flow_history = 100.0, [(-math.inf, 100.0)]  # 1.50 mm: no walls alarm, the overrides as before
     s.run(30)
     assert not s.decisions[-1]["reason"].startswith(WALLS)
+
+
+@pytest.mark.parametrize("op, value, floor, error_mm, sent", [
+    ("flow_percent", 120, True, 0.2, True), ("speed_override_percent", 80, True, 0.2, True),
+    ("flow_percent", 121, True, 0.2, False), ("flow_percent", 80, True, 0.2, False),
+    ("speed_override_percent", 100, True, 0.2, False), ("flow_percent", 120, True, -0.1, False),
+    ("flow_percent", 120, False, 0.2, False)],
+    ids=["floor 2x widening", "floor 2x widening by speed", "floor 2x + 1", "floor 2x narrowing", "floor 2x speed up",
+         "floor 2x, bead wider than wanted", "2x without the floor rules"])
+def test_the_floor_rules_bigger_step_goes_out_only_widening_a_narrow_bead(sim, op, value, floor, error_mm, sent):
+    s = sim(auto=True, config={"floor_step_factor": 2.0})
+    if (op, value) == ("speed_override_percent", 100):
+        s.speed = 80.0  # so that +20 is inside the bounds: a narrowing step
+    s.run(3)
+    s.pipeline.controller = RogueController(s.pipeline.controller, {"operation": op, "value": value}, floor=floor,
+                                            error_mm=error_mm)
+    d = s.pipeline.tick()
+    assert (len(s.bridge.sent) == 1) is sent
+    if not sent:
+        assert "from the readback" in d["reason"] and d["sent"] is False
 
 
 def test_the_pipeline_keeps_its_own_spacing(sim):
@@ -1495,3 +1516,17 @@ def test_recorded_print_gives_estimates_and_advice_and_writes_no_image(tmp_path,
     assert writes == [] and holds_image(p) == []
     assert {f.name for f in (tmp_path / "data").iterdir()} <= DB_FILES | {"control.json"}
     assert list((tmp_path / "tmp").iterdir()) == []
+
+
+def test_env_controller_reads_the_operator_pin_and_ignores_bad_values():
+    from server.pipeline import env_controller
+    assert env_controller({}) is None
+    for bad in ("inf", "nan", "-inf"):
+        assert env_controller({"CONTROL_PIN_S": bad, "CONTROL_FLOOR_STEP_FACTOR": bad}) is None
+    assert env_controller({"CONTROL_FLOOR_STEP_FACTOR": "2"}) == {"floor_step_factor": 2.0}
+    assert env_controller({"CONTROL_FLOOR_STEP_FACTOR": "2.5"}) is None  # outside 1-2: keep the default
+    assert env_controller({"CONTROL_PIN_S": "60"}) == {"pin_s": 60.0}
+    assert env_controller({"CONTROL_PIN_S": "10"}) is None  # below the floor: keep the default
+    assert env_controller({"CONTROL_PIN_S": "soon"}) is None
+    assert env_controller({"CONTROL_PIN_S": "60", "CONTROL_MIN_LAYER": "3"}) == {"pin_s": 60.0, "min_layer": 3}
+    assert env_controller({"CONTROL_MIN_LAYER": "0"}) is None
