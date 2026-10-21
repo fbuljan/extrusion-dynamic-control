@@ -1,70 +1,23 @@
 const showIr = cameraView("#ir", "#ir-label", "#ir-empty", "IR");
-const showRgb = cameraView("#rgb", "#rgb-label", "#rgb-empty", "RGB");
-
-function onFrame(f) { (f.camera_kind === "ir" ? showIr : showRgb)(f); }
+const onFrame = f => f.camera_kind === "ir" && showIr(f);
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
-// ---- layout: camera mode, swap, and three resize handles, remembered per browser ----------------------------------
-const stage = $("#stage"), consoleEl = $("#console");
-const DEFAULT_LAYOUT = { layout: "pip", main: "ir", rack: 440, pip: 30, split: 50 };
-const inRange = (v, lo, hi, fallback) => (typeof v === "number" && v >= lo && v <= hi ? v : fallback);
-function validLayout(saved) {
-  const d = DEFAULT_LAYOUT, s = saved && typeof saved === "object" ? saved : {};
-  return {
-    layout: ["pip", "split", "single"].includes(s.layout) ? s.layout : d.layout,
-    main: ["ir", "rgb"].includes(s.main) ? s.main : d.main,
-    rack: inRange(s.rack, 340, 760, d.rack), pip: inRange(s.pip, 15, 60, d.pip), split: inRange(s.split, 20, 80, d.split),
-  };
-}
-const ui = validLayout(prefs.get("layout", {}));
+// ---- layout: the control rack width, remembered per browser (older builds also stored camera mode and sizes) -------
+const consoleEl = $("#console");
+const RACK_MIN = 340, RACK_MAX = 760, RACK_DEFAULT = 440;
+const savedRack = prefs.get("layout", {})?.rack;
+let rackWidth = typeof savedRack === "number" && savedRack >= RACK_MIN && savedRack <= RACK_MAX ? savedRack : RACK_DEFAULT;
 
 function applyLayout() {
-  stage.dataset.layout = ui.layout;
-  stage.dataset.main = ui.main;
-  consoleEl.style.setProperty("--rack-w", `${ui.rack}px`);
-  stage.style.setProperty("--pip-w", `${ui.pip}%`);
-  stage.style.setProperty("--split", `${ui.split}%`);
-  document.querySelectorAll(".seg button").forEach(b => b.setAttribute("aria-pressed", b.dataset.layout === ui.layout));
-  prefs.set("layout", ui);
+  consoleEl.style.setProperty("--rack-w", `${rackWidth}px`);
+  prefs.set("layout", { rack: rackWidth });  // rewriting the key also drops the retired camera-layout fields
 }
-const setLayout = layout => { ui.layout = layout; applyLayout(); };
-const swap = () => { ui.main = ui.main === "ir" ? "rgb" : "ir"; applyLayout(); };
-
-document.querySelectorAll(".seg button").forEach(b => (b.onclick = () => setLayout(b.dataset.layout)));
-$("#swap").onclick = swap;
-document.querySelectorAll(".cam").forEach(cam => cam.addEventListener("click", e => {
-  if (ui.layout === "pip" && cam.dataset.kind !== ui.main && !e.target.classList.contains("pip-grip")) swap();
-}));
 
 draggable($("#rack-splitter"), {
-  onDrag: e => { ui.rack = clamp(consoleEl.getBoundingClientRect().right - e.clientX, 340, 760); applyLayout(); },
-  onKey: step => { ui.rack = clamp(ui.rack - step * 16, 340, 760); applyLayout(); },
-  onReset: () => { ui.rack = DEFAULT_LAYOUT.rack; applyLayout(); },
-});
-draggable($("#cam-divider"), {
-  onDrag: e => {
-    const r = stage.getBoundingClientRect();
-    ui.split = clamp(((e.clientX - r.left) / r.width) * 100, 20, 80);
-    applyLayout();
-  },
-  onKey: step => { ui.split = clamp(ui.split + step * 2, 20, 80); applyLayout(); },
-  onReset: () => { ui.split = DEFAULT_LAYOUT.split; applyLayout(); },
-});
-document.querySelectorAll(".pip-grip").forEach(grip => draggable(grip, {
-  onDrag: e => {
-    const r = stage.getBoundingClientRect();
-    ui.pip = clamp(((r.right - e.clientX) / r.width) * 100, 15, 60);
-    applyLayout();
-  },
-  onReset: () => { ui.pip = DEFAULT_LAYOUT.pip; applyLayout(); },
-}));
-
-document.addEventListener("keydown", e => {
-  if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.("input, textarea, select, dialog")) return;
-  if (e.key === "s" || e.key === "S") swap();
-  const layout = { 1: "pip", 2: "split", 3: "single" }[e.key];
-  if (layout) setLayout(layout);
+  onDrag: e => { rackWidth = clamp(consoleEl.getBoundingClientRect().right - e.clientX, RACK_MIN, RACK_MAX); applyLayout(); },
+  onKey: step => { rackWidth = clamp(rackWidth - step * 16, RACK_MIN, RACK_MAX); applyLayout(); },
+  onReset: () => { rackWidth = RACK_DEFAULT; applyLayout(); },
 });
 applyLayout();
 
@@ -464,16 +417,22 @@ function setDecision(d, ageMs) {
 
 const chosenOf = d => d.action && (d.candidates || []).find(c => c.operation === d.action.operation && c.value === d.action.value);
 
+// The controller leads a reason with this alarm while it keeps acting on the rest; it shows as its own line above the decision.
+const NARROW_ALARM = /^alarm:\s*(below [\d.]+ mm)\s*\(walls may not touch\)\s*;?\s*/;
+
 function decisionLine(d) {
-  const alarm = /^alarm:/.test(d.reason || "");
-  const reason = (d.reason || "").replace(/^alarm:\s*/, "");
+  const raw = d.reason || "", narrowMatch = NARROW_ALARM.exec(raw);
+  const narrow = narrowMatch ? `${narrowMatch[1]}: walls may not touch` : "";
+  const rest = narrowMatch ? raw.slice(narrowMatch[0].length) : raw;  // a latched alarm behind it stays an alarm
+  const alarm = /^alarm:/.test(rest);
+  const reason = rest.replace(/^alarm:\s*/, "");
   const a = d.action;
   const act = a ? move(a.operation, chosenOf(d)?.from, a.value) : "";
   if (a && d.sent === false) {  // refused at the last moment: the action did not happen, so it must not read like it did
-    return { text: `not sent · ${reason.replace(/^not sent:\s*/, "") || "refused"}`, alarm, notSent: true, intended: act };
+    return { text: `not sent · ${reason.replace(/^not sent:\s*/, "") || "refused"}`, alarm, narrow, notSent: true, intended: act };
   }
   const parts = alarm ? ["alarm", reason] : a ? [act, d.hold ? "hold" : "", d.hold ? reason : ""] : [d.hold ? "hold" : "", reason || "no action"];
-  return { text: parts.filter(Boolean).join(" · "), alarm, notSent: false, intended: "" };
+  return { text: parts.filter(Boolean).join(" · "), alarm, narrow, notSent: false, intended: "" };
 }
 
 function limitsLine(limits) {
@@ -517,12 +476,13 @@ function renderDecision() {
     shownWhy = "";
     return;
   }
-  const d = decision.d, { text, alarm, notSent, intended } = decisionLine(d);
+  const d = decision.d, { text, alarm, narrow, notSent, intended } = decisionLine(d);
   const auto = typeof d.mode === "string" && d.mode.startsWith("auto"), dry = auto && (d.dry === true || (control && !control.send_enabled));
   const chip = !auto ? "advice" : dry ? "auto · dry" : "auto";
-  if (box.dataset.sig !== `${chip}|${text}|${intended}`) {
-    box.dataset.sig = `${chip}|${text}|${intended}`;
-    box.replaceChildren(node("span", "mode", chip), node("span", notSent ? "unsent" : "", text), ...(intended ? [node("span", "intended", intended)] : []));
+  if (box.dataset.sig !== `${chip}|${narrow}|${text}|${intended}`) {
+    box.dataset.sig = `${chip}|${narrow}|${text}|${intended}`;
+    box.replaceChildren(...(narrow ? [node("span", "alarm-line", narrow)] : []), node("span", "mode", chip),
+      node("span", notSent ? "unsent" : "", text), ...(intended ? [node("span", "intended", intended)] : []));
     box.title = `${chip}: ${d.reason || text}`;
   }
   box.dataset.sent = notSent ? "0" : "";

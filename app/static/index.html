@@ -44,28 +44,11 @@
 
 <main class="console" id="console">
   <section class="stage-wrap">
-    <div class="stage-bar">
-      <div class="seg" role="group" aria-label="Camera layout">
-        <button data-layout="pip" title="Picture in picture (1)">PiP</button>
-        <button data-layout="split" title="Side by side (2)">Split</button>
-        <button data-layout="single" title="One camera (3)">Single</button>
-      </div>
-      <button class="btn" id="swap" title="Swap cameras (S)">⇄ Swap</button>
-    </div>
-    <div class="stage" id="stage" data-layout="pip" data-main="ir">
+    <div class="stage" id="stage">
       <figure class="cam" id="cam-ir" data-kind="ir">
         <img id="ir" alt="Thermal camera, raw">
         <figcaption id="ir-label" class="tally" data-state="none">IR · waiting</figcaption>
-        <span id="ir-empty" class="empty">Waiting for IR frames. The trailing camera publishes about one per second.</span>
-        <span class="pip-grip" title="Drag to resize"></span>
-      </figure>
-      <div class="cam-divider" id="cam-divider" role="separator" aria-orientation="vertical" tabindex="0"
-           aria-label="Resize cameras"></div>
-      <figure class="cam" id="cam-rgb" data-kind="rgb">
-        <img id="rgb" alt="RGB camera">
-        <figcaption id="rgb-label" class="tally" data-state="none">RGB · waiting</figcaption>
-        <span id="rgb-empty" class="empty">Waiting for RGB frames.</span>
-        <span class="pip-grip" title="Drag to resize"></span>
+        <span id="ir-empty" class="empty">Waiting for IR frames from the trailing camera.</span>
       </figure>
     </div>
   </section>

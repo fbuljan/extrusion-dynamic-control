@@ -1,6 +1,7 @@
 // Shared WebSocket client and helpers. Paths stay relative so the app works behind the device reverse proxy too.
 const FRAME_LEASE_MS = 400;  // organiser rule: a frame is "fresh" for 400 ms
 const FRAME_HOLD_MS = 2000;  // a held frame may be shown, labelled, for up to 2 s
+const FRAME_DUE_MS = 750;  // 1.5 IR frame intervals at 2 frames/s: the lease alone (~300 ms) flips the label every frame
 
 const handlers = {};
 function on(type, fn) { (handlers[type] ||= []).push(fn); }
@@ -33,7 +34,8 @@ function renderStatus(s) {
   led($("#st-writer"), `writer ${s.writer}`, state(s.writer));
 }
 
-// Camera panel that honours the frame lease: fresh → shown, held → labelled, expired → cleared.
+// Camera panel that honours the frame lease: live (within its lease or the next frame not yet due) → shown,
+// held → labelled, expired → cleared.
 function cameraView(imgSel, labelSel, emptySel, name) {
   const img = $(imgSel), label = $(labelSel), empty = $(emptySel);
   let last = null;
@@ -47,17 +49,17 @@ function cameraView(imgSel, labelSel, emptySel, name) {
       label.dataset.state = "none";
       return;
     }
-    const fresh = sinceArrival <= last.lease;
+    const live = sinceArrival <= Math.max(last.lease, FRAME_DUE_MS);
     const ageS = ((last.source_age_ms || 0) + sinceArrival) / 1000;
     // Spans let compact views drop the redundant index and role; freshness and age always stay visible.
-    const parts = [`cam ${last.camera_index + 1}`, `idx ${last.camera_index}`, last.role, fresh ? "fresh" : "held", `${ageS.toFixed(1)} s old`];
+    const parts = [`cam ${last.camera_index + 1}`, `idx ${last.camera_index}`, last.role, live ? "live" : "held", `${ageS.toFixed(1)} s old`];
     const nodes = [Object.assign(document.createElement("b"), { textContent: name })];
     parts.forEach((text, i) => {
       nodes.push(" ", Object.assign(document.createElement("span"), { className: i === 1 ? "idx" : i === 2 ? "role" : "", textContent: text }));
     });
     label.replaceChildren(...nodes);
     label.title = [name, ...parts].join(" · ");
-    label.dataset.state = fresh ? "fresh" : "held";
+    label.dataset.state = live ? "fresh" : "held";
   }
   setInterval(update, 100);
   // Lease and ages are relative to arrival: the publisher's clock runs ~160 ms behind, so expires_utc_ms can't be

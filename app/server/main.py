@@ -1,4 +1,4 @@
-"""Extrusion monitor web app: live IR/RGB view, all printer topics, graphs, and LEAM correction requests."""
+"""Extrusion monitor web app: live IR view, all printer topics, graphs, and LEAM correction requests."""
 import asyncio
 import json
 import logging

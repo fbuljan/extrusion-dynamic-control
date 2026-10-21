@@ -43,6 +43,8 @@ widthChart.data.datasets.push(
 const widthSamples = [];  // {t, mm, atCeiling} real-width estimates, t = when measured (ms)
 const targetSamples = [];  // {t, target} operator target as polled; target null = none
 const ceilingSamples = [];  // {t, ceiling} camera ceiling as polled; null = none
+// Without a ceiling in the camera model these two series stay empty, so their legend entries are hidden.
+widthChart.options.plugins.legend.labels.filter = item => item.datasetIndex < 2 || widthChart.data.datasets[item.datasetIndex].data.some(p => p.y !== null);
 const rateChart = lineChart("c-rate", []);
 const samples = [];  // telemetry metrics with .t (ms)
 const rateSamples = [];  // {t, rates: {topic: rate}}

@@ -236,11 +236,12 @@ class Bridge:
             if t - self.last_telemetry_emit_ms >= 200:
                 self.last_telemetry_emit_ms = t
                 self._emit(metrics)
-        elif "/preview/" in topic and isinstance(payload, dict) and payload.get("jpeg_base64"):
+        elif "/preview/" in topic and isinstance(payload, dict) and payload.get("jpeg_base64") \
+                and payload.get("camera_kind") == "ir":  # the app shows IR only; any other preview is just counted
             frame = {"type": "frame", "recv_ms": t, **{k: payload.get(k) for k in (
                 "camera_kind", "camera_index", "role", "jpeg_base64", "published_utc_ms", "expires_utc_ms",
                 "source_age_ms", "sequence", "session_id", "selection_revision")}}
-            self.frames[payload.get("camera_kind")] = frame
+            self.frames["ir"] = frame
             self._emit(frame)
         elif topic.endswith("/extrusion/status"):
             self.writer_status = payload

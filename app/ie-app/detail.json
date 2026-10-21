@@ -1,4 +1,4 @@
 {"versionNumber":"","versionId":"","title":"Extrusion Monitor","appId":"eb75e2c88b894fad8998cb13bc3bfdc5","restRedirectUrl":"",
  "redirectSection":"hello-edge","redirectUrl":"hello-edge/","redirectType":"FromBoxReverseProxy",
- "description":"Live IR/RGB view, printer topics, graphs and flow/pressure-advance control","swarmModeEnable":false,"required":[],"releaseNotes":"","signUpType":"None",
+ "description":"Live IR view, printer topics, graphs and flow/pressure-advance control","swarmModeEnable":false,"required":[],"releaseNotes":"","signUpType":"None",
  "externalConfigurator":false,"externalUrl":"","webAddress":"","isAppSecure":false}

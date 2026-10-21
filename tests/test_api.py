@@ -29,10 +29,17 @@ def control_json():
 
 
 @pytest.fixture
-def api(tmp_path, monkeypatch, control_json):
+def model_jsons():
+    return {}
+
+
+@pytest.fixture
+def api(tmp_path, monkeypatch, control_json, model_jsons):
     """A fresh server.main with DATA_DIR and MODELS_DIR in tmp and no broker; other tests' modules are restored after."""
     data, models = tmp_path / "data", tmp_path / "models"
     models.mkdir()
+    for name, body in model_jsons.items():
+        (models / name).write_text(json.dumps(body))
     if control_json is not None:
         data.mkdir()
         (data / "control.json").write_text(control_json)
@@ -235,6 +242,22 @@ def test_models_status(api):
     assert models["printer_model"] == {"present": False, "version": None, "error": None}
 
 
+def camera_file(knee_mm):
+    group = {"k_px_per_mm": 2.2, "offset_px": -0.3, "knee_mm": knee_mm, "sigma_mm": 0.09, "ramp_mm": 0.05,
+             "k_rel_sd": 0.1, "valid_px": [2.1, None if knee_mm is None else 3.5]}
+    return {"version": "camera-test", "profile": "print2", "ref": {"nozzle_c": 220.0, "speed_mm_s": 20.0},
+            "g_T_px_per_c": 0.008, "s_px_per_mm_s": 0.0, "above_knee_sigma_mm": 0.25,
+            "profiles": {"print2": {"groups": {"cam3:45": group}}}}
+
+
+@pytest.mark.parametrize("model_jsons,ceiling,status", [({"camera_model.json": camera_file(1.5)}, 1.5, 400),
+                                                        ({"camera_model.json": camera_file(None)}, None, 200)])
+def test_a_camera_model_without_a_knee_has_no_ceiling_and_takes_wider_targets(api, ceiling, status):
+    body = api.client.get("/api/control").json()
+    assert body["models"]["camera_model"]["present"] and body["ceiling_mm"] == ceiling
+    assert api.client.post("/api/control", json={"target_mm": 1.7}).status_code == status
+
+
 def test_model_files_status_cases(tmp_path):
     (tmp_path / "geometry.json").write_text("[1, 2]")
     (tmp_path / "camera_model.json").write_text(json.dumps({"k": 1}))
@@ -412,3 +435,21 @@ def test_existing_endpoints_still_work(api):
     assert api.client.get("/").status_code == 200
     with api.client.websocket_connect("/ws") as ws:
         assert ws.receive_json()["type"] == "snapshot"
+
+
+def test_only_ir_previews_reach_the_dashboard(api):
+    bridge, sent = api.main.bridge, []
+    bridge.listeners.append(sent.append)
+
+    def preview(kind, side="trailing"):
+        payload = {"camera_kind": kind, "camera_index": 1, "role": side, "jpeg_base64": "AAAA", "sequence": 1}
+        bridge._on_message(None, None, SimpleNamespace(
+            topic=f"demex/demo/mini/preview/{kind}/{side}", payload=json.dumps(payload).encode(), retain=False))
+
+    preview("rgb")
+    assert bridge.snapshot()["frames"] == {} and [m for m in sent if m["type"] == "frame"] == []
+    preview("ir")
+    assert list(bridge.snapshot()["frames"]) == ["ir"]
+    assert [m["camera_kind"] for m in sent if m["type"] == "frame"] == ["ir"]
+    assert set(api.client.get("/api/topics").json()) == {"demex/demo/mini/preview/rgb/trailing",
+                                                          "demex/demo/mini/preview/ir/trailing"}
