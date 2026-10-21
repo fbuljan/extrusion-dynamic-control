@@ -316,6 +316,10 @@ def safety_violations(out, config=None):
 SETPOINTS = {"flow_percent": 100.0, "speed_override_percent": 100.0, "nozzle_temperature_c": 220.0}
 MELTY = 1.3  # melt capacity (mm) below the bead: speed and nozzle work, flow doesn't
 NOW = {"persist_s": 0, "persist_estimates": 1}  # act on the first estimate off target
+# Scenarios built on the team's old bounds (D30) and on the printer model's own word about the nozzle (no D54 floor)
+D30 = {"levers": {"flow_percent": {"bounds": (70, 130)}, "speed_override_percent": {"bounds": (60, 100)}}}
+MODEL_ONLY = {"min_gain_mm": {}}
+OLD = {**D30, **MODEL_ONLY}
 BELOW = "alarm: below 1.30 mm (walls may not touch); "
 
 
@@ -844,14 +848,14 @@ def test_config_refuses_unsafe_or_unknown_settings(bad):
 
 def test_config_merges_per_lever_and_limits_are_json_safe():
     limits = Controller(StubPrinterModel()).limits()
-    assert limits["levers"]["flow_percent"] == {"min": 70, "max": 130, "max_step": 10, "base_max_step": 10,
-                                                "enabled": True}
+    assert limits["levers"]["flow_percent"] == {"min": 0, "max": 200, "max_step": 10, "base_max_step": 10,
+                                                "enabled": True}, "LEAM's ranges (D54)"
     assert set(limits["levers"]) == set(OPS)
     assert set(Controller(None, {"mode": "fallback"}).limits()["levers"]) == {"flow_percent"}
     narrower = Controller(StubPrinterModel(), {"levers": {"flow_percent": {"bounds": (90, 110)},
                                                           "nozzle_temperature_c": None}}).limits()["levers"]
     assert narrower == {"flow_percent": {"min": 90, "max": 110, "max_step": 10, "base_max_step": 10, "enabled": True},
-                        "speed_override_percent": {"min": 60, "max": 100, "max_step": 10, "base_max_step": 10,
+                        "speed_override_percent": {"min": 10, "max": 200, "max_step": 10, "base_max_step": 10,
                                                    "enabled": True}}
     json.dumps(limits)
 
@@ -906,7 +910,7 @@ def test_external_readback_change_pins_the_lever_and_holds_everything():
     assert d.action["operation"] == "speed_override_percent"
     assert "flow_percent" not in {c["operation"] for c in d.candidates}
     assert r.c.pinned(r.t + 300_000) == {}
-    r = Rig().armed(1.30)
+    r = Rig(config=MODEL_ONLY).armed(1.30)
     r.sp["flow_percent"] = 95.0
     r.step(1.30)
     r.step(1.30, dt_ms=30_000)
@@ -1192,7 +1196,7 @@ def test_nozzle_change_is_gated_for_its_own_30_s_effect_delay():
 
 
 def test_unreachable_target_takes_one_step_then_alarms():
-    for printer, config in ((StubPrinterModel(melt_width_mm=2.0), None), (None, {"mode": "fallback"})):
+    for printer, config in ((StubPrinterModel(melt_width_mm=2.0), OLD), (None, {"mode": "fallback", **OLD})):
         r = Rig(printer, config=config, target=2.6).armed(1.5)
         d = r.act(1.5)
         assert d.action and d.reason.startswith("target out of reach (needs +1.10 mm")
@@ -1223,7 +1227,7 @@ def test_after_a_step_the_next_needs_its_own_run_off_target_even_across_data_gap
 
 
 def test_lever_with_less_than_30_percent_of_the_predicted_effect_is_dropped():
-    r = Rig(StubPrinterModel(melt_width_mm=2.0), target=1.5).armed(1.30)
+    r = Rig(StubPrinterModel(melt_width_mm=2.0), config=MODEL_ONLY, target=1.5).armed(1.30)
     assert r.ceiling is None  # a camera model without a ceiling: widening steps are judged like any other
     d = r.act(1.30)
     for i in range(2):
@@ -1662,7 +1666,8 @@ def test_nothing_is_sent_with_auto_off():
 
 
 def test_unreachable_target_is_not_chased_to_the_bounds():
-    out = sim(PlantParams(melt_width_mm=HEADROOM), printer=StubPrinterModel(melt_width_mm=HEADROOM), target=2.6)
+    out = sim(PlantParams(melt_width_mm=HEADROOM), printer=StubPrinterModel(melt_width_mm=HEADROOM), target=2.6,
+              config=OLD)
     assert len(out["loop"].sent) <= 1
     assert out["loop"].decisions[-1][0].reason.startswith("alarm: target out of reach")
 
@@ -1699,7 +1704,7 @@ GRID = {
     # an unmodelled blur floor compresses narrow beads: never converges, the width is held 0.3-0.45 mm off, steadily
     "blur floor": dict(sensor=dict(floor_px=1.0), expect="off", bound=0.5),
     # flow pinned at 95 % by someone else and nothing else moves the width here: alarm for the 5 min pin, then flow
-    "foreign sender": dict(events=[(150, operator("flow_percent", 95, via_gateway=True))], expect="pinned"),
+    "foreign sender": dict(events=[(150, operator("flow_percent", 95, via_gateway=True))], expect="pinned", config=OLD),
 }
 
 
@@ -1711,8 +1716,8 @@ def test_mismatch_grid(name, seed):
               printer=StubPrinterModel(melt_width_mm=HEADROOM, **spec.get("printer", {})),
               target=Plant(PlantParams(melt_width_mm=HEADROOM)).true_width_mm, seed=seed, duration_s=600,
               events=[(60, clog(0.9)), *spec.get("events", [])], gate_closed=spec.get("gate_closed", ()),
-              forced=spec.get("forced"), setup=spec.get("setup"))
-    assert safety_violations(out) == []
+              forced=spec.get("forced"), setup=spec.get("setup"), config=spec.get("config"))
+    assert safety_violations(out, spec.get("config")) == []
     err = np.abs(out["true_mm"] - out["target"])[out["t_s"] > 540]
     start = converged_at(out, 60)
     if spec["expect"] == "converges":
@@ -1925,7 +1930,7 @@ KNEE = dict(melt_width_mm=1.5, softness_mm=0.01)  # asked = meltable at 100 % / 
 
 def test_a_pair_moves_two_levers_when_each_alone_is_capped_by_the_other():
     # Live 21 Oct 19:12: speed at its bound, flow +10 % and nozzle +5 C each did ~0.01 mm, together ~0.08 (D53).
-    r = Rig(StubPrinterModel(**KNEE), config=NOW, target=1.7).armed(1.5)
+    r = Rig(StubPrinterModel(**KNEE), config={**NOW, **MODEL_ONLY}, target=1.7).armed(1.5)
     r.c.tune({"speed_override_percent": {"enabled": False}})
     d = r.act(1.5)
     assert d.action["operation"] == "nozzle_temperature_c" and d.then["operation"] == "flow_percent", d.reason
@@ -1947,12 +1952,12 @@ def test_a_pair_moves_two_levers_when_each_alone_is_capped_by_the_other():
 
 
 def test_a_pair_is_dropped_when_its_first_half_is_not_sent_or_someone_else_moves_a_lever():
-    r = Rig(StubPrinterModel(**KNEE), config=NOW, target=1.7).armed(1.5)
+    r = Rig(StubPrinterModel(**KNEE), config={**NOW, **MODEL_ONLY}, target=1.7).armed(1.5)
     r.c.tune({"speed_override_percent": {"enabled": False}})
     d = r.act(1.5)
     r.c.note_unsent(d.action["operation"], d.action["value"], r.t)  # dry run or refused by the send guard
     assert r.c._next is None
-    r = Rig(StubPrinterModel(**KNEE), config=NOW, target=1.7).armed(1.5)
+    r = Rig(StubPrinterModel(**KNEE), config={**NOW, **MODEL_ONLY}, target=1.7).armed(1.5)
     r.c.tune({"speed_override_percent": {"enabled": False}})
     d = r.act(1.5)
     r.send(d)
@@ -1961,7 +1966,7 @@ def test_a_pair_is_dropped_when_its_first_half_is_not_sent_or_someone_else_moves
 
 
 def test_advice_shows_a_pair_and_keeps_nothing_to_send():
-    r = Rig(StubPrinterModel(**KNEE), config=NOW, target=1.7, auto=False).armed(1.5)
+    r = Rig(StubPrinterModel(**KNEE), config={**NOW, **MODEL_ONLY}, target=1.7, auto=False).armed(1.5)
     r.c.tune({"speed_override_percent": {"enabled": False}})
     d = r.act(1.5)
     assert d.mode == "advise" and d.then and " + flow 100 % -> " in d.reason and r.c._next is None
@@ -1969,8 +1974,8 @@ def test_advice_shows_a_pair_and_keeps_nothing_to_send():
 
 def test_a_lever_near_its_bound_is_spared_for_one_in_the_middle():
     # Speed at 66 % in 60-100 (D53): walking it to 60 % leaves Auto nothing to widen with next time.
-    plain = Rig(StubPrinterModel(melt_width_mm=0.9), config={**NOW, "headroom_weight": 0.0}, target=1.5)
-    spared = Rig(StubPrinterModel(melt_width_mm=0.9), config=NOW, target=1.5)  # melt-limited at 66 %: flow can't help
+    plain = Rig(StubPrinterModel(melt_width_mm=0.9), config={**NOW, **OLD, "headroom_weight": 0.0}, target=1.5)
+    spared = Rig(StubPrinterModel(melt_width_mm=0.9), config={**NOW, **OLD}, target=1.5)  # melt-limited at 66 %: flow can't help
     for r in (plain, spared):
         r.sp["speed_override_percent"] = 66.0
         r.armed(1.36)
@@ -1978,3 +1983,20 @@ def test_a_lever_near_its_bound_is_spared_for_one_in_the_middle():
     d = spared.act(1.36)
     assert d.action["value"] >= 62 if d.action["operation"] == "speed_override_percent" else True
     assert {d.action["operation"], (d.then or {}).get("operation")} != {"speed_override_percent", None}, d.reason
+
+
+def test_the_nozzle_floor_lets_auto_use_heat_where_the_model_rules_it_out():
+    # Live 21 Oct 20:00: flow at its bound, the model's corner gave nozzle +5 C +0.00000003 mm; 215 -> 225 C had
+    # widened the bead 0.10 mm (D54). The floor: at least min_gain_mm per C, so Auto heats instead of alarming.
+    printer = StubPrinterModel(melt_width_mm=2.4, softness_mm=0.01)  # far from the melt limit: heat does nothing
+    blind = Rig(printer, config={**NOW, **D30, **MODEL_ONLY}, target=1.6)
+    floored = Rig(printer, config={**NOW, **D30}, target=1.6)
+    for r in (blind, floored):
+        r.sp["flow_percent"] = 130.0
+        r.armed(1.45)
+    assert blind.act(1.45).reason.startswith("alarm: no usable lever can move the width (flow at its limit (130 %)")
+    d = floored.act(1.45)
+    assert d.action == {"operation": "nozzle_temperature_c", "value": 225}, d.reason
+    assert d.predicted_mm - 1.45 == pytest.approx(0.025)
+    view = floored.c.sensitivity(floored.sp, floored.measured, floored.context)["levers"]["nozzle_temperature_c"]
+    assert view["up"] == pytest.approx(0.025) and view["down"] < 0, "the Test bench shows the floor too"

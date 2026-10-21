@@ -12,13 +12,17 @@ GROUP_RULES = ("none", "two_groups")
 DEFAULTS = {
     "mode": "model",  # "model": printer-model increments over all levers; "fallback": flow-only proportional
     "levers": {
-        # effect_delay_s: deposit time after confirmation before a sample can show the change (pressure / heater lag)
-        "flow_percent": {"bounds": (70, 130), "max_step": 10, "cost": 1.0, "effect_delay_s": 3, "tolerance": 0.5},
-        "speed_override_percent": {"bounds": (60, 100), "max_step": 10, "cost": 3.0, "effect_delay_s": 3,
+        # effect_delay_s: deposit time after confirmation before a sample can show the change (pressure / heater lag).
+        # Bounds are LEAM's own ranges (D54); the operator narrows them on the Test bench.
+        "flow_percent": {"bounds": (0, 200), "max_step": 10, "cost": 1.0, "effect_delay_s": 3, "tolerance": 0.5},
+        "speed_override_percent": {"bounds": (10, 200), "max_step": 10, "cost": 3.0, "effect_delay_s": 3,
                                    "tolerance": 0.5},
         "nozzle_temperature_c": {"bounds": (190, 250), "max_step": 5, "cost": 10.0, "effect_delay_s": 30,
                                  "tolerance": 0.5},
     },
+    # The least effect (mm per unit, hotter / more = wider) the planner assumes, whatever the printer model says: its
+    # corner rules the nozzle out (+0.00000003 mm per 5 C live) where 215 -> 225 C widened the bead 0.10 mm (D54).
+    "min_gain_mm": {"nozzle_temperature_c": 0.005},
     "kappa": 0.5,                # ask the model for this fraction of the gap per command
     "deadband_mm": 0.05,
     "sigma_factor": 2.0,         # also hold while |error| <= sigma_factor * estimate sigma
@@ -81,9 +85,34 @@ FLOORS = {"min_spacing_ms": (2000, None), "max_failures": (1, 3), "foreign_hold_
 
 
 # What the operator may set at runtime on the Test bench, and the range the app accepts (int: whole numbers only).
-OPERATOR = {"min_width_mm": (0.8, 2.0, float), "persist_s": (0.0, 60.0, float), "persist_estimates": (1, 20, int),
+# <lever>_min / <lever>_max are that lever's bounds, inside LEAM's range.
+BOUND_KEYS = {f"{op}_{end}": (op, i) for op in LEVERS for i, end in enumerate(("min", "max"))}
+OPERATOR = {**{key: (*LEAM_RANGES[op], int) for key, (op, _) in BOUND_KEYS.items()},"min_width_mm": (0.8, 2.0, float), "persist_s": (0.0, 60.0, float), "persist_estimates": (1, 20, int),
             "kappa": (0.1, 1.0, float), "pin_s": (60.0, 900.0, float), "min_layer": (1, 50, int),
             "floor_step_factor": (1.0, 2.0, float)}
+
+
+def operator_value(cfg, key):
+    """An operator setting's value in a loaded config (None: that lever isn't configured)."""
+    if key in BOUND_KEYS:
+        op, end = BOUND_KEYS[key]
+        return cfg["levers"][op]["bounds"][end] if op in cfg["levers"] else None
+    return cfg[key]
+
+
+def with_operator(config, settings):
+    """load() overrides: the deployment's `config` with the operator's `settings` over it (bounds become lever
+    bounds, the other end kept)."""
+    out = {**(config or {}), **{k: v for k, v in settings.items() if k not in BOUND_KEYS}}
+    base = load(config)
+    for op in LEVERS:
+        ends = (settings.get(f"{op}_min"), settings.get(f"{op}_max"))
+        if ends != (None, None) and op in base["levers"]:
+            bounds = tuple(base["levers"][op]["bounds"][i] if e is None else e for i, e in enumerate(ends))
+            levers = dict(out.get("levers") or {})
+            levers[op] = {**levers.get(op, {}), "bounds": bounds}
+            out["levers"] = levers
+    return out
 
 
 def load(overrides=None):
@@ -123,6 +152,10 @@ def load(overrides=None):
             raise ValueError(f"{op} effect_delay_s must be >= 0")
         if not 0 < spec["tolerance"] <= spec["max_step"] / 2:
             raise ValueError(f"{op} tolerance must be within (0, max_step / 2]")
+    gains = cfg["min_gain_mm"]
+    if not isinstance(gains, dict) or any(op not in LEVERS or not (isinstance(g, (int, float)) and g >= 0)
+                                          for op, g in gains.items()):
+        raise ValueError("min_gain_mm must map levers to numbers >= 0")
     if not 0 < cfg["kappa"] <= 1:
         raise ValueError("kappa must be within (0, 1]")
     if cfg["floor_min_confidence"] > cfg["min_confidence"]:

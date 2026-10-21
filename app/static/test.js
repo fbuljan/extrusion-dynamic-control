@@ -765,7 +765,7 @@ function renderModel() {
   $("#model-note").textContent = [
     `Model expects ${fmt(m.width_mm, 2)} mm at these settings${isNum(gap) ? `; measured ${signed(gap, 2)} from that` : ""}.`,
     dead.includes("flow") ? "Flow barely moves the width here: the model thinks the hotend is at its melt limit, so more filament doesn't widen the bead." : "",
-    "Auto picks the step that best closes half the gap, weighing cost (flow 1, speed 3, nozzle 10).",
+    "Auto picks the cheapest move, one lever or two, that closes enough of the gap (cost flow 1, speed 3, nozzle 10, more near a limit); the nozzle counts at least +0.025 mm per +5 °C, whatever the model says.",
   ].filter(Boolean).join(" ");
 }
 
@@ -904,7 +904,9 @@ const SETTINGS = [
   { key: "floor_step_factor", name: "Walls step", short: "walls step", unit: "×", min: 1, max: 2, step: 0.1,
     why: "below the walls limit, Auto's steps may be this many times bigger" },
 ];
-const SETTING_BY_KEY = { ...Object.fromEntries(SETTINGS.map(s => [s.key, s])), min_width_mm: { short: "walls", unit: "mm" } };
+const RANGES = LEVERS.map(l => ({ op: l.op, name: `${l.name}`, unit: l.unit, min: l.min, max: l.max }));
+const SETTING_BY_KEY = { ...Object.fromEntries(SETTINGS.map(s => [s.key, s])), min_width_mm: { short: "walls", unit: "mm" },
+  ...Object.fromEntries(RANGES.flatMap(r => ["min", "max"].map(end => [`${r.op}_${end}`, { short: `${r.name.toLowerCase()} ${end}`, unit: r.unit }]))) };
 const shownValue = (s, v) => (isNum(v) ? round3(v * (s.scale || 1)) : null);
 const settingText = (key, v) => {
   const s = SETTING_BY_KEY[key];
@@ -918,6 +920,18 @@ $("#set-rows").replaceChildren(...SETTINGS.map(s => {
     <input class="lcd" id="set-${s.key}" type="number" min="${s.min}" max="${s.max}" step="${s.step}" inputmode="decimal">
     <span class="set-unit">${s.unit}</span><span class="set-def"><span class="set-base"></span>
       <button type="button" class="mini" title="Back to the deployment's value">reset</button></span>
+    <div class="set-out" aria-live="polite"></div>`;
+  return el;
+}));
+$("#range-rows").replaceChildren(...RANGES.map(r => {
+  const el = node("div", "set-row set-range");
+  el.dataset.op = r.op;
+  el.innerHTML = `
+    <span class="set-name"><span class="silk">${r.name}</span><small>LEAM allows ${r.min}–${r.max} ${r.unit}</small></span>
+    <span class="set-pair"><input class="lcd" data-end="min" type="number" min="${r.min}" max="${r.max}" step="1" aria-label="${r.name} lowest for Auto">
+      <span>–</span><input class="lcd" data-end="max" type="number" min="${r.min}" max="${r.max}" step="1" aria-label="${r.name} highest for Auto"></span>
+    <span class="set-unit">${r.unit}</span><span class="set-def"><span class="set-base"></span>
+      <button type="button" class="mini" title="Back to LEAM's range">reset</button></span>
     <div class="set-out" aria-live="polite"></div>`;
   return el;
 }));
@@ -949,6 +963,33 @@ for (const s of SETTINGS) {
   };
   el.querySelector(".mini").onclick = () => commitSetting(s, null);
 }
+for (const r of RANGES) {
+  const el = $(`.set-range[data-op="${r.op}"]`), out = el.querySelector(".set-out");
+  const send = async body => {
+    const res = await postControl({ settings: body });
+    out.textContent = res.error ? (res.lost ? res.error : `Not set: ${res.error}`) : "";
+    renderSettings();
+  };
+  el.querySelectorAll("input").forEach(input => {
+    const key = `${r.op}_${input.dataset.end}`;
+    input.oninput = () => settingEditing.add(key);
+    input.onblur = () => {
+      if (!settingEditing.has(key)) return;
+      settingEditing.delete(key);
+      const raw = input.value.trim(), v = Number(raw);
+      if (raw !== "" && !(Number.isInteger(v) && v >= r.min && v <= r.max)) {
+        out.textContent = `Not set: a whole number from ${r.min} to ${r.max} ${r.unit}`;
+        return renderSettings();
+      }
+      send({ [key]: raw === "" ? null : v });
+    };
+    input.onkeydown = e => {
+      if (e.key === "Enter") input.blur();
+      else if (e.key === "Escape") { settingEditing.delete(key); renderSettings(); input.blur(); }
+    };
+  });
+  el.querySelector(".mini").onclick = () => send({ [`${r.op}_min`]: null, [`${r.op}_max`]: null });
+}
 function renderSettings() {
   const up = controlOk(), mine = control?.settings || {}, base = control?.limits?.defaults || {}, now = control?.limits || {};
   for (const s of SETTINGS) {
@@ -958,6 +999,17 @@ function renderSettings() {
     if (!settingEditing.has(s.key)) input.value = isNum(v) ? shownValue(s, v) : "";
     el.dataset.custom = isNum(mine[s.key]) ? "1" : "";
     el.querySelector(".set-base").textContent = isNum(mine[s.key]) && isNum(base[s.key]) ? `default ${shownValue(s, base[s.key])}` : "default";
+  }
+  for (const r of RANGES) {
+    const el = $(`.set-range[data-op="${r.op}"]`), keys = ["min", "max"].map(end => `${r.op}_${end}`);
+    const custom = keys.some(k => isNum(mine[k]));
+    el.querySelectorAll("input").forEach((input, i) => {
+      const v = isNum(mine[keys[i]]) ? mine[keys[i]] : isNum(base[keys[i]]) ? base[keys[i]] : [r.min, r.max][i];
+      input.disabled = !up;
+      if (!settingEditing.has(keys[i])) input.value = v;
+    });
+    el.dataset.custom = custom ? "1" : "";
+    el.querySelector(".set-base").textContent = custom ? `LEAM ${r.min}–${r.max}` : "LEAM's";
   }
 }
 

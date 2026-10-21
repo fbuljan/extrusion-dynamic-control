@@ -44,7 +44,9 @@ DEADBAND_MM = 0.05  # the controller's own band; its 2-sigma term widens it to ~
 WITHIN_MM = 0.10  # recovery is asserted "within 0.10 mm" of the target (true width); within 0.05 mm is only reported
 RECOVERED_WITHIN_S = 120
 # Limits written down here, not read from the controller's config, so a loosened config cannot pass its own test.
-ABSOLUTE_BOUNDS = {"flow_percent": (70, 130), "speed_override_percent": (60, 100), "nozzle_temperature_c": (190, 250)}
+ABSOLUTE_BOUNDS = {"flow_percent": (0, 200), "speed_override_percent": (10, 200), "nozzle_temperature_c": (190, 250)}  # LEAM's (D54)
+D30 = {"levers": {"flow_percent": {"bounds": (70, 130)}, "speed_override_percent": {"bounds": (60, 100)}},
+       "min_gain_mm": {}}  # the team's old bounds, and the model's own word on the nozzle
 ABSOLUTE_STEP = {"flow_percent": 10, "speed_override_percent": 10, "nozzle_temperature_c": 5}
 ABSOLUTE_SPACING_S = 2.0
 WIDENS = {"flow_percent": 1, "speed_override_percent": -1, "nozzle_temperature_c": 1}  # the way that widens the bead
@@ -426,7 +428,8 @@ def test_melt_limit_drop_is_recovered_with_speed(run, seed):
 
 @pytest.mark.parametrize("seed", range(3))
 def test_melt_limit_drop_with_an_unaware_model_stays_safe_and_alarms(run, seed):
-    out, rig = run(seed=seed, duration_s=600, events=[(DISTURBED_AT_S, melt_limit(0.6))])
+    # Under the old bounds (D30). Under LEAM's (D54) the same run drives flow to ~199 %: the operator's bounds matter.
+    out, rig = run(seed=seed, duration_s=600, events=[(DISTURBED_AT_S, melt_limit(0.6))], config=D30)
     summary("melt limit -40 %, unaware model", seed, out, rig, DISTURBED_AT_S)
     assert out["flow_percent"].max() <= 130 and out["speed_override_percent"].min() >= 60
     assert len(rig.requests) <= 8, "it does not keep pushing a lever that cannot help"
@@ -535,6 +538,7 @@ def test_a_target_without_the_apps_stamp_is_never_acted_on(run):
 
 def test_the_safety_check_holds_the_written_down_limits_even_against_a_loosened_config():
     loose = control_config.load({"levers": {"flow_percent": {"bounds": (0, 200), "max_step": 100}}})
+    loose["levers"]["flow_percent"]["bounds"] = (0, 250)  # looser than LEAM's: the written-down limits must still hold
     t_s = np.arange(0, 100.0)
     out = {"t_s": t_s, "flow_percent": np.full(100, 100.0), "speed_override_percent": np.full(100, 100.0),
            "nozzle_target_c": np.full(100, 220.0)}
@@ -548,5 +552,5 @@ def test_the_safety_check_holds_the_written_down_limits_even_against_a_loosened_
         return SimpleNamespace(pipeline=SimpleNamespace(controller=SimpleNamespace(cfg=loose)), requests=rows, final={})
 
     assert safety_problems(out, rig(110)) == []
-    assert any("absolute limits" in p for p in safety_problems(out, rig(190)))
+    assert any("absolute limits" in p for p in safety_problems(out, rig(110, 210)))
     assert any("step" in p for p in safety_problems(out, rig(125)))

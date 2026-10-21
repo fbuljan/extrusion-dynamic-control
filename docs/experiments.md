@@ -312,3 +312,25 @@ Hypothesis: letting Auto act below 1.30 mm inside the noise band, on lower confi
 Method: replay of the cube test's recorded estimates and readbacks through the deployed and the new controller (open loop, first action only; the recorded 25 s estimate is counted as fresh 15 s after a change), and the realistic bench at 2 Hz with correlated frames at walls (1×) and infill (3×) frame noise: nozzle drop, clog 85 % and steady prints (10–30 seeds). After the review: steps 1× vs 2×, confidence 0.35 vs 0.45, and a steady-drift measure (mean bias and time off target on 30 steady prints).
 Result: replay: nozzle fault first action +58 s (deployed: none in the replay; live +265 s); clog dip +40 s (deployed: never, held on confidence 0.48–0.50); the same with 1× and 2× steps and confidence 0.45. Bench at 3× noise, final defaults (1×, 0.45), 20 seeds: clog fixed within 180 s 16/20 (2×: 19/20; deployed 6/20), nozzle drop first action 68 s (75), below 1.30 mm 5 s (11), back within 0.05 mm 131 s (142); unneeded moves on steady prints 94 per 200 min (deployed 44). Steady drift, 30 × 10 min at 3×: mean bias +0.074 mm (2×: +0.111; deployed +0.019), off target by > 0.10 mm 22 % of the time (2×: 52 %; deployed 2 %), flow reached 130 % in the worst run (also with 1×). At 1× noise nothing gets worse (17 vs 15 moves per 100 min). No safety violations; the step checks allow a bigger step only on the deciding tick, widening a bead narrower than wanted. A 20 s hold without the 1.35 mm release made the steady cost 58.
 Verdict: adopt (D48) with 1× steps by default (2× ratchets the bead wide on noisy prints; `CONTROL_FLOOR_STEP_FACTOR` for a test); count unneeded moves and the drift on the next cube's steady stretch.
+
+## 21 Oct ~20:10: two-lever moves (D53) on the live recording, and online learning (fan-out, 5 agents)
+
+Hypothesis: most "no usable lever" alarms are planner artifacts; online learning could fix the model's errors in a print.
+Method: the device's own decisions of live-20261021-1830 (18:34-19:55, 4799 ticks) replayed through Controller.step in
+advice mode, old (721a229) and D53 (0df4a86) code, open loop; the old code reproduces the recorded alarms (997 vs 997,
+98.9 % same class per tick). Online learning: step table of every setpoint change on the live print, cube and square;
+noise floor between quiet windows; a gain learner replayed on the recordings and on the sim bench (20 seeds).
+Result: D53 halves the alarms (997 -> 538); all of the gain is the pairs (344 nozzle+flow, 115 flow+speed proposals,
+median +0.078 mm), the headroom cost changes no count. Every alarm left, and all 230 on the device after 19:55, is one
+state: flow 130 % (its bound), speed 60 % (its bound), nozzle 225 C, where the model says only flow could widen. A lower
+or capped bar, kappa 0.5, three levers, speed down to 50 % alone, alpha 0.006 or anchoring each clear 0 of them; only a
+flow bound of 140-160 % clears them in the model. The printer disagrees with the model there: flow 110 -> 130 % did not
+widen the reading (model +0.13 mm), nozzle 215 -> 225 C did (+0.09-0.10 mm after 30-45 s; model +0.015). The camera
+under-reads wide beads (calliper, flow 130 % + speed 80 %: 2.17 mm real vs 1.76 app), so at that state the reading may
+lag the bead. Online learning: noise between quiet windows SD 0.03-0.06 mm, one flow step of 10 % is ~2 sigma, 5 % is
+~1; 8 of 9 Auto commands coincided with a layer change, another command or an operator change; a learner replayed on
+today's print ends at 0.96 +- 0.31 (flow) and 0.93 +- 0.30 (nozzle), changing no decision; on the cube it learned speed
+1.3-1.6x from steps during a fault recovery; on the realistic bench outcomes moved -23 % to +19 % with no direction.
+Verdict: keep D53. Online learning: park for control, at most a predicted-vs-measured display. Open: calliper at the
+stuck state decides between "printer at its limits" and "camera blind above ~1.5 mm on infill"; the alarm text lists a
+lever's wrong-way step at its bound ("flow -10 %") and calls an unreachable target "no usable lever".

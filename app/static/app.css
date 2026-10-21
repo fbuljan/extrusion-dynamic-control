@@ -544,6 +544,11 @@ body[data-link="offline"] :is(.scope, .loop, .events-box) { opacity: .5; }
 .set-def { display: flex; align-items: center; justify-content: space-between; gap: 5px; font: 10.5px var(--mono); color: var(--muted); white-space: nowrap; }
 .set-def .mini { min-width: 0; padding: 3px 6px; font-size: 10.5px; }
 .set-row:not([data-custom="1"]) .set-def .mini { display: none; }
+.set-range { grid-template-columns: minmax(0, 1fr) 124px 14px 112px; }
+.set-pair { display: grid; grid-template-columns: 1fr 8px 1fr; align-items: center; text-align: center; color: var(--muted); }
+.set-range[data-custom="1"] .lcd { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 45%, var(--line-soft)); }
+.set-range:not([data-custom="1"]) .set-def .mini { display: none; }
+.set-sub { margin-top: 8px; }
 .set-out { grid-column: 1 / -1; font: 10.5px/1.2 var(--mono); color: var(--bad); }
 .set-out:empty { display: none; }
 .lv-out { font: 10.5px/1.2 var(--mono); color: var(--muted); overflow-wrap: anywhere; }

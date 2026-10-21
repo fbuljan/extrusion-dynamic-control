@@ -167,6 +167,9 @@ def test_the_band_persists_with_the_target_and_tuning_lives_in_memory(api):
     {"settings": {"persist_estimates": 2.5}}, {"settings": {"pin_s": 30}}, {"settings": {"kappa": 0}},
     {"settings": {"kappa": True}}, {"settings": {"deadband_mm": 0.1}}, {"settings": [1]},
     {"settings": {"min_width_mm": 1.4, "floor_step_factor": 3}},
+    {"settings": {"flow_percent_min": 150, "flow_percent_max": 140}}, {"settings": {"speed_override_percent_min": 5}},
+    {"settings": {"nozzle_temperature_c_max": 260}}, {"settings": {"flow_percent_max": 130.5}},
+    {"settings": {"nozzle_temperature_c_min": 250}},
 ])
 def test_invalid_band_or_tuning_is_400_and_changes_nothing(api, payload):
     api.client.post("/api/control", json={"band_below_mm": 0.1})
@@ -186,6 +189,8 @@ def test_operator_settings_merge_persist_and_reset(api):
     assert json.loads((api.data / "control.json").read_text())["settings"] == {"persist_estimates": 3, "kappa": 0.7}
     assert ControlState(api.data / "control.json").public()["settings"] == {"persist_estimates": 3, "kappa": 0.7}
     assert isinstance(ControlState(api.data / "control.json").public()["settings"]["persist_estimates"], int)
+    r = api.client.post("/api/control", json={"settings": {"flow_percent_min": 70, "flow_percent_max": 130}})
+    assert r.status_code == 200 and r.json()["settings"]["flow_percent_max"] == 130, "the operator's bounds (D54)"
 
 
 def test_the_trace_serves_rows_and_the_operators_changes(api):

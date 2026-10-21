@@ -139,7 +139,7 @@ class Controller:
     def limits(self):
         out = control_config.limits(self.cfg)
         base = control_config.load(self._config)
-        out["defaults"] = {k: base[k] for k in control_config.OPERATOR}  # what the deployment runs without the operator
+        out["defaults"] = {k: control_config.operator_value(base, k) for k in control_config.OPERATOR}  # without the operator
         for op, lever in out["levers"].items():
             lever.update(base_max_step=lever["max_step"], max_step=self.max_step(op), enabled=self.lever_enabled(op))
         return out
@@ -151,7 +151,7 @@ class Controller:
         if want == self._operator:
             return
         try:
-            cfg = control_config.load({**self._config, **want})
+            cfg = control_config.load(control_config.with_operator(self._config, want))
         except ValueError:
             return
         self.cfg, self._operator = cfg, want
@@ -183,9 +183,10 @@ class Controller:
             for op, spec in self.levers.items():
                 c, step, (lo, hi) = current[op], self.max_step(op), spec["bounds"]
                 up, down = min(hi, c + step), max(lo, c - step)
-                out[op] = {"at": c, "step": step,
-                           "up": self._width(self._settings(current, measured, op, up), context) - w0 if up > c else None,
-                           "down": self._width(self._settings(current, measured, op, down), context) - w0 if down < c else None}
+                change = {v: self._floored(op, v - c, self._width(self._settings(current, measured, op, v), context) - w0)
+                          for v in (up, down)}
+                out[op] = {"at": c, "step": step, "up": change[up] if up > c else None,
+                           "down": change[down] if down < c else None}
         except ModelFailure:
             return None
         return {"width_mm": w0, "levers": out}
@@ -589,7 +590,7 @@ class Controller:
         bar = cfg["min_effect_fraction"] * cfg["kappa"] * abs(error)
         if best is None or best["promise_mm"] * direction < bar:
             disabled = [r for op, r in self._disabled.items() if op in self.levers]
-            why = f"alarm: no usable lever can move the width ({self._blocked(now_ms, current, candidates, bar)})"
+            why = f"alarm: no usable lever can move the width ({self._blocked(now_ms, current, candidates, bar, direction)})"
             if disabled:
                 why = f"{disabled[0]}; no usable lever can move the width{RE_ARM if auto else RE_ARM_ADVISE}"
             return hold(why, candidates)
@@ -653,21 +654,25 @@ class Controller:
         return Decision(now_ms, "auto", dict(n["action"]), reason, n["error"] if error is None else error,
                         n["before"][0] + n["predicted"], [half], False, n["floor"])
 
-    def _blocked(self, now_ms, current, candidates, bar):
-        """Why each lever can't help, in a few words: switched off, at its limit, or how little its best step does."""
+    def _blocked(self, now_ms, current, candidates, bar, direction):
+        """Why each lever can't help, in a few words: switched off, at its limit, or how little its best step the
+        helpful way does."""
         best = {c["operation"]: c for c in candidates}
         parts = []
         for op in self.levers:
             name, unit = NAMES[op]
-            why = self._excluded(op, now_ms)
+            why, c = self._excluded(op, now_ms), best.get(op)
             if why:
                 parts.append(f"{name} {why if why in ('switched off', 'pinned') else 'stopped'}")
-            elif op in best and best[op]["full_step_change_mm"] != 0:
-                c, step = best[op], self.levers[op]["max_step"] * (self.cfg["floor_step_factor"] if self._floor else 1)
+            elif c and c["full_step_change_mm"] * direction > 0:
+                step = self.levers[op]["max_step"] * (self.cfg["floor_step_factor"] if self._floor else 1)
                 parts.append(f"{name} {math.copysign(step, c['value'] - c['from']):+g} {unit} "
                              f"{c['full_step_change_mm']:+.3f} mm")
             else:
-                parts.append(f"{name} at its limit ({current[op]:g} {unit})")
+                lo, hi = self.levers[op]["bounds"]
+                at = lo if abs(current[op] - lo) <= abs(current[op] - hi) else hi
+                parts.append(f"{name} at its limit ({at:g} {unit})" if abs(current[op] - at) < 0.5
+                             else f"{name} can't move it this way")
         return f"{', '.join(parts)}; a step must give {bar:.3f} mm"
 
     def _settled(self, now_ms, estimate):
@@ -836,6 +841,12 @@ class Controller:
                 else (lo, mid)
         return (lo + hi) / 2
 
+    def _floored(self, op, delta, change, rest=0.0):
+        """A move's predicted change with `op` moved by `delta` held to at least min_gain_mm per unit on top of
+        `rest` (the change of the move's other levers): hotter or more is wider, the model's corner aside."""
+        floor = self.cfg["min_gain_mm"].get(op, 0.0) * delta
+        return max(change, rest + floor) if floor > 0 else min(change, rest + floor) if floor < 0 else change
+
     def _edge(self, op, value):
         """The cost of standing in the outer headroom_fraction of a lever's range: up to headroom_weight at the bound."""
         lo, hi = self.levers[op]["bounds"]
@@ -867,6 +878,14 @@ class Controller:
             return self._width(s, context)
 
         w0 = width()
+
+        def effect(*moves):
+            change = width(*moves) - w0
+            for op, v in moves:
+                rest = width(*(m for m in moves if m[0] != op)) - w0 if len(moves) > 1 else 0.0
+                change = self._floored(op, v - current[op], change, rest)
+            return change
+
         candidates, plans, combo, steps, full = [], [], {}, {}, {}
         for op, spec in self.levers.items():
             c = current[op]
@@ -881,11 +900,11 @@ class Controller:
             tuned = self.max_step(op) < spec["max_step"]
             top = None
             for v in values:
-                change = width((op, v)) - w0
+                change = effect((op, v))
                 d = 1 if v > c else -1
                 plan = {"operation": op, "value": v, "from": c, "predicted_change_mm": change,
                         "residual": abs(goal - change) / abs(goal), "score": self._score(((op, v, c),), change, goal),
-                        "full_step_change_mm": width((op, full[op][d])) - w0}
+                        "full_step_change_mm": effect((op, full[op][d]))}
                 plan["promise_mm"] = plan["full_step_change_mm"] if tuned else change
                 plans.append(plan)
                 if top is None or plan["score"] < top["score"]:
@@ -893,10 +912,10 @@ class Controller:
             candidates.append({k: top[k] for k in ("operation", "value", "from", "predicted_change_mm", "residual",
                                                     "score", "full_step_change_mm")})
             # The way this lever helps on its own, if any: a pair moves each lever that way.
-            helps = [d for d in (1, -1) if (width((op, full[op][d])) - w0) * direction > 0 and full[op][d] != c]
+            helps = [d for d in (1, -1) if effect((op, full[op][d])) * direction > 0 and full[op][d] != c]
             if helps:
                 steps[op] = [v for v in values if (v - c) * helps[0] > 0]
-            change, v = max(((width((op, v)) - w0, v) for v in spec["bounds"]), key=lambda e: e[0] * error)
+            change, v = max(((effect((op, v)), v) for v in spec["bounds"]), key=lambda e: e[0] * error)
             if change * error > 0:
                 combo[op] = v
         if cfg["pair_moves"]:
@@ -906,19 +925,19 @@ class Controller:
                     tuned = self.max_step(a) < self.levers[a]["max_step"] or self.max_step(b) < self.levers[b]["max_step"]
                     for va in steps[a]:
                         for vb in steps[b]:
-                            change = width((a, va), (b, vb)) - w0
+                            change = effect((a, va), (b, vb))
                             moves = ((a, va, current[a]), (b, vb, current[b]))
-                            full_change = width((a, full[a][1 if va > current[a] else -1]),
-                                                (b, full[b][1 if vb > current[b] else -1])) - w0 if tuned else change
+                            full_change = effect((a, full[a][1 if va > current[a] else -1]),
+                                                 (b, full[b][1 if vb > current[b] else -1])) if tuned else change
                             plans.append({"operation": a, "value": va, "from": current[a], "predicted_change_mm": change,
                                           "residual": abs(goal - change) / abs(goal),
                                           "score": self._score(moves, change, goal), "full_step_change_mm": full_change,
-                                          "promise_mm": full_change, "first_change_mm": width((a, va)) - w0,
+                                          "promise_mm": full_change, "first_change_mm": effect((a, va)),
                                           "then": {"operation": b, "value": vb}})
         useful = [p for p in plans if p["predicted_change_mm"] * direction > 0 and p["promise_mm"] * direction >= bar]
         best = min(useful, key=lambda p: p["score"]) if useful else None
         # Reach: every usable lever at its helpful bound at once; walking levers to bounds for less is pointless.
-        return best, candidates, width(*combo.items()) - w0
+        return best, candidates, effect(*combo.items())
 
     @staticmethod
     def _move(settings, current, op, value, flow_scale):

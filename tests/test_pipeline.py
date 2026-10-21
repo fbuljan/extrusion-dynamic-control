@@ -588,6 +588,9 @@ class RogueController:
     def configure(self, settings):
         self.real.configure(settings)
 
+    def sensitivity(self, *args):
+        return self.real.sensitivity(*args)
+
     def band_mm(self, band):
         return self.real.band_mm(band)
 
@@ -608,6 +611,7 @@ REFUSALS = {"ok": None, "auto_off_mid_step": "Auto is off", "sends_disabled": "s
 @pytest.mark.parametrize("case", list(REFUSALS))
 def test_the_pipeline_refuses_what_the_controller_must_never_ask(sim, monkeypatch, case):
     s = sim(auto=True)
+    s.control.update({"settings": {"flow_percent_min": 70, "flow_percent_max": 130}})  # the operator's bounds (D54)
     if case == "out_of_bounds_small_step":
         s.flow = 125.0
     s.run(3)
@@ -1002,7 +1006,7 @@ def test_every_frame_is_a_sample_and_every_step_carries_the_models_view(sim):
     model = trace["rows"][-1]["model"]
     assert set(model["levers"]) == {"flow_percent", "speed_override_percent", "nozzle_temperature_c"}
     flow, speed = model["levers"]["flow_percent"], model["levers"]["speed_override_percent"]
-    assert flow["up"] > 0 > flow["down"] and speed["up"] is None and speed["down"] > 0, "speed sits at its 100 % bound"
+    assert flow["up"] > 0 > flow["down"] and speed["up"] < 0 <= speed["down"], "faster narrows (LEAM bounds, D54)"
     assert [m["t_ms"] for m in s.emitted if m["type"] == "trace"] == [r["t_ms"] for r in trace["rows"]]
     json.dumps(trace, allow_nan=False)
 

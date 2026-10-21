@@ -97,6 +97,11 @@ def _check_settings(value, current):
                 kind is int and v != int(v):
             raise ValueError(f"{key} must be {'a whole number' if kind is int else 'a number'} from {lo:g} to {hi:g}")
         merged[key] = kind(v)
+    for op in control_config.LEVERS:
+        lo, hi = (merged.get(f"{op}_{end}", control_config.DEFAULTS["levers"][op]["bounds"][i])
+                  for i, end in enumerate(("min", "max")))
+        if lo >= hi:
+            raise ValueError(f"{op} min ({lo:g}) must be below its max ({hi:g})")
     return merged
 
 
