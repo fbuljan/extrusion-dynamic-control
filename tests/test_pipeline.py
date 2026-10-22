@@ -530,7 +530,7 @@ def test_sent_marks_published_actions_and_unsent_ones_reach_the_controller(sim, 
     for send, make_error in ((True, None), (False, None), (True, "no fresh writer status, try again in a moment")):
         s = sim(auto=False, send=send)
         s.bridge.make_error = make_error
-        monkeypatch.setattr(s.pipeline.controller, "note_unsent", lambda op, value, now: unsent.append(
+        monkeypatch.setattr(s.pipeline.controller, "note_unsent", lambda op, value, now, retry=False: unsent.append(
             (send, make_error, op, value, now)), raising=False)
         s.run(20)
         s.run(60, auto=lambda now: True)

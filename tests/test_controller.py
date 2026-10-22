@@ -1979,6 +1979,22 @@ def test_a_pair_is_dropped_when_its_first_half_is_not_sent_or_someone_else_moves
     assert r.c._next is None
 
 
+def test_a_pair_second_half_refused_by_the_rate_limit_goes_out_on_a_later_tick():
+    # Live 22 Oct 11:07:37: speed 59 -> 56 refused "rate limit: wait 0.0s" and the pair was dropped half done.
+    r = Rig(StubPrinterModel(**KNEE), config={**NOW, **MODEL_ONLY}, target=1.7).armed(1.5)
+    r.c.tune({"speed_override_percent": {"enabled": False}})
+    d = r.act(1.5)
+    r.send(d)
+    r.step(1.5)
+    r.sp["nozzle_temperature_c"] = float(d.action["value"])
+    r.c.note_result(1, "setting_confirmed", r.t)
+    second = r.step(None)
+    assert second.action == d.then, second.reason
+    r.c.note_unsent(second.action["operation"], second.action["value"], r.t, retry=True)
+    again = [r.step(None) for _ in range(3)]
+    assert any(x.action == d.then and "second half of" in x.reason for x in again), [x.reason for x in again]
+
+
 def test_advice_shows_a_pair_and_keeps_nothing_to_send():
     r = Rig(StubPrinterModel(**KNEE), config={**NOW, **MODEL_ONLY}, target=1.7, auto=False).armed(1.5)
     r.c.tune({"speed_override_percent": {"enabled": False}})

@@ -15,6 +15,9 @@ REQUEST_TOPIC = "demex/hackathon/mini/extrusion/request"
 WRITER_TOPICS = ["demex/hackathon/mini/extrusion/result", "demex/hackathon/mini/extrusion/status"]
 # LEAM accepts one request per second across all senders; ours (manual and Auto alike) keep 2 s of headroom.
 MIN_REQUEST_INTERVAL_S = 2.0
+# The control loop spaces sends by its 1 Hz tick clock, which jitters against wall time by a few ms (22 Oct 11:07:37:
+# a pair's second half refused with "wait 0.0s"); still far above LEAM's 1 s.
+RATE_SLACK_S = 0.1
 HISTORY_POINTS = 600
 STALE_SOURCE_MS = 3000
 SETTING_KEYS = ["host", "port", "reader_user", "reader_password", "writer_user", "writer_password", "controller_id"]
@@ -324,7 +327,7 @@ class Bridge:
             if not self.writer or self.status.get("writer") != "connected":
                 return self.log_refused(what, f"writer not connected ({self.status.get('writer')})")
             wait = MIN_REQUEST_INTERVAL_S - (time.time() - self.last_request_s)
-            if wait > 0:
+            if wait > RATE_SLACK_S:
                 return self.log_refused(what, f"rate limit: wait {wait:.1f}s")
             if isinstance(sequence, int) and sequence <= self.last_sequence:
                 return self.log_refused(what, f"sequence {sequence} already used; build a new request")

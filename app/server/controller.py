@@ -221,8 +221,11 @@ class Controller:
         if p.get("unreachable"):
             self._unreachable_steps += 1
 
-    def note_unsent(self, operation, value, now_ms):
-        """An Auto proposal that wasn't published (sends disabled, refused): if someone applies it, it is ours."""
+    def note_unsent(self, operation, value, now_ms, retry=False):
+        """An Auto proposal that wasn't published (sends disabled, refused): if someone applies it, it is ours. With
+        `retry` (a passing refusal such as the rate limit) a pair's second half stays planned and goes out next tick."""
+        if retry and self._next and self._next["action"] == {"operation": operation, "value": value}:
+            return
         p = self._proposal if self._proposal and self._proposal["action"] == {"operation": operation, "value": value} \
             else {}
         self._advice.append((operation, value, now_ms, p.get("predicted"), p.get("before")))

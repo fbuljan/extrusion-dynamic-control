@@ -679,13 +679,13 @@ class Pipeline:
                 out["sent"] = why is None
                 if why:  # the planned action stays in `action`; the dashboard must not show it as taken
                     out.update(hold=True, reason=lead_with(walls, f"not sent: {why}"))
-                    self._note_unsent(d.action, now)
+                    self._note_unsent(d.action, now, retry=why.startswith("rate limit"))
         return out
 
-    def _note_unsent(self, action, now):
+    def _note_unsent(self, action, now, retry=False):
         fn = getattr(self.controller, "note_unsent", None)
         if callable(fn):
-            fn(action.get("operation"), action.get("value"), now)
+            fn(action.get("operation"), action.get("value"), now, retry=retry)
 
     def _inputs(self, now):
         tel = self._telemetry
