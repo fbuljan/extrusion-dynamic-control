@@ -978,6 +978,10 @@ for (const r of RANGES) {
 }
 function renderSettings() {
   const up = controlOk(), mine = control?.settings || {}, base = control?.limits?.defaults || {}, now = control?.limits || {};
+  const margin = now.width_margin_mm;
+  $("#margin-note").hidden = !(isNum(margin) && margin > 0);
+  $("#margin-note").textContent = isNum(margin) && margin > 0
+    ? `Safety margin +${fmt(margin, 2)} mm (set at deploy): every width here reads ${fmt(margin, 2)} mm narrower than the camera's, so Auto keeps the real bead that much wider.` : "";
   for (const s of SETTINGS) {
     const el = $(`.set-row[data-key="${s.key}"]`), input = el.querySelector("input");
     const v = isNum(mine[s.key]) ? mine[s.key] : isNum(base[s.key]) ? base[s.key] : now[s.key];

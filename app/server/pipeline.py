@@ -27,6 +27,7 @@ from pathlib import Path
 
 from . import control_config, model_files
 from .bridge import STALE_SOURCE_MS, dig, now_ms, telemetry_metrics
+from .camera_model import MarginCameraModel
 from .control_state import send_enabled
 from .controller import Controller, Decision, lead_with
 from .estimator import WidthEstimator
@@ -50,9 +51,11 @@ DEFAULTS = {
     # The dashboard's width averages over this many seconds; the controller keeps the estimator's 25 s, where a shorter
     # window widens the noise band faster than it cuts the lag (D51).
     "display_window_s": 15.0,
+    "width_margin_mm": 0.0,  # every width reads this much narrower: Auto keeps the real bead this much wider (D55)
 }
 ENV_SETTINGS = {"FIRST_LAYER_MM": "first_layer_mm", "LAYER_MM": "layer_mm", "LINE_WIDTH_MM": "line_width_mm",
-                "DISPLAY_WINDOW_S": "display_window_s"}
+                "DISPLAY_WINDOW_S": "display_window_s", "WIDTH_MARGIN_MM": "width_margin_mm"}
+MAX_MARGIN_MM = 0.5
 TARGET_ALARM = "alarm: target set under another camera model; set it again"
 STATS = ("frames_done", "frames_dropped", "sent", "send_refused", "send_failed", "send_uncertain", "foreign_results")
 TRACE_REASON_CHARS = 200
@@ -112,7 +115,8 @@ def env_settings(environ=None):
             value = float(raw)
         except ValueError:
             value = math.nan
-        if is_number(value) and value > 0:
+        margin = key == "width_margin_mm"
+        if is_number(value) and (value > 0 or margin and value == 0) and not (margin and value > MAX_MARGIN_MM):
             out[key] = value
         else:
             log.warning("ignoring %s=%r: expected a positive number; using %s", var, raw, DEFAULTS[key])
@@ -205,6 +209,8 @@ class Pipeline:
         self.emit = emit or (lambda message: None)
         self.extractor = extractor if extractor is not None else WidthExtractor(geometry) if geometry else None
         self.controller = Controller(printer_model, controller_config)
+        if camera_model is not None and self.cfg["width_margin_mm"]:
+            camera_model = MarginCameraModel(camera_model, self.cfg["width_margin_mm"])
         self.estimator = WidthEstimator(camera_model)
         self.display = WidthEstimator(camera_model, {"window_s": self.cfg["display_window_s"]})
         self._judged = None  # the controller's estimate at the last step
@@ -298,9 +304,14 @@ class Pipeline:
         now = self.clock()
         return {op: dict(p) for op, p in self._pinned.items() if p["until_ms"] > now}
 
+    def _model_view(self, setpoints, measured, context):
+        """The printer model's view for the Test bench, on the same scale as the widths shown (less the margin)."""
+        view = self.controller.sensitivity(setpoints, measured, context) if self._can_act else None
+        return {**view, "width_mm": view["width_mm"] - self.cfg["width_margin_mm"]} if view else view
+
     def limits(self):
         """What the controller may do (with the operator's tuning); nothing while a model it needs is missing."""
-        return self.controller.limits() if self._can_act else {}
+        return {**self.controller.limits(), "width_margin_mm": self.cfg["width_margin_mm"]} if self._can_act else {}
 
     def trace(self, since_ms=None):
         """Trace rows and operator events newer than since_ms (all kept without), oldest first."""
@@ -333,8 +344,10 @@ class Pipeline:
         if cam is None:
             return None
         version, profile = model_field(cam, "version"), getattr(cam, "profile", None)
-        return {"camera_model": f"{version}:{profile}" if profile else str(version), "relative": self.relative(),
-                "by": by}
+        name = f"{version}:{profile}" if profile else str(version)
+        if self.cfg["width_margin_mm"]:  # a target typed without the margin meant a different real width
+            name += f"+margin{self.cfg['width_margin_mm']:.2f}"
+        return {"camera_model": name, "relative": self.relative(), "by": by}
 
     def target_problem(self, target, stamp):
         """Why this target must not be acted on under the loaded camera model, or None."""
@@ -632,7 +645,7 @@ class Pipeline:
                "predicted_mm": out.get("predicted_mm"), "reason": (out.get("reason") or "")[:TRACE_REASON_CHARS],
                "candidates": [{k: c.get(k) for k in ("operation", "value", "from", "predicted_change_mm", "score")}
                               for c in out.get("candidates") or []],
-               "model": self.controller.sensitivity(setpoints, measured, context) if self._can_act else None}
+               "model": self._model_view(setpoints, measured, context)}
         row = jsonable(row)
         with self._trace_lock:
             self._trace.append(row)
