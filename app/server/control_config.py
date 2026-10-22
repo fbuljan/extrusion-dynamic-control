@@ -84,7 +84,8 @@ FLOORS = {"min_spacing_ms": (2000, None), "max_failures": (1, 3), "foreign_hold_
           "persist_gap_s": (1, None),
           "min_width_mm": (0.8, 2.0), "floor_min_confidence": (0.3, None),
           "floor_step_factor": (1.0, 2.0), "floor_hold_s": (0, 60), "floor_release_mm": (0, 0.2),
-          "headroom_fraction": (0.0, 0.5), "headroom_weight": (0.0, None), "max_run_steps": (2, None)}
+          "headroom_fraction": (0.0, 0.5), "headroom_weight": (0.0, None), "max_run_steps": (2, None),
+          "sigma_factor": (0.0, 3.0)}
 
 
 # What the operator may set at runtime on the Test bench, and the range the app accepts (int: whole numbers only).

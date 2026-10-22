@@ -1626,6 +1626,8 @@ def test_env_controller_reads_the_operator_pin_and_ignores_bad_values():
     assert env_controller({"CONTROL_MIN_LAYER": "0"}) is None
     fast = {"CONTROL_PERSIST_S": "5", "CONTROL_PERSIST_ESTIMATES": "3", "CONTROL_KAPPA": "0.7"}
     assert env_controller(fast) == {"persist_s": 5.0, "persist_estimates": 3, "kappa": 0.7}
+    assert env_controller({"CONTROL_SIGMA_FACTOR": "1"}) == {"sigma_factor": 1.0}
+    assert env_controller({"CONTROL_SIGMA_FACTOR": "-1"}) is None
     for bad in ({"CONTROL_PERSIST_ESTIMATES": "0"}, {"CONTROL_KAPPA": "1.5"}, {"CONTROL_KAPPA": "0"},
                 {"CONTROL_PERSIST_S": "-1"}, {"CONTROL_PERSIST_ESTIMATES": "2.5"}):
         assert env_controller(bad) is None, bad

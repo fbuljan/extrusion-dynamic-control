@@ -33,6 +33,8 @@ services:
       CONTROL_PERSIST_S: ${CONTROL_PERSIST_S:-10}
       CONTROL_PERSIST_ESTIMATES: ${CONTROL_PERSIST_ESTIMATES:-5}
       CONTROL_KAPPA: ${CONTROL_KAPPA:-0.5}
+      # Auto also holds within this many sigmas of the average's noise around the target (controller default 2); D57.
+      CONTROL_SIGMA_FACTOR: ${CONTROL_SIGMA_FACTOR:-2.0}
       # Walls limit: below it the alarm shows and Auto's floor rules act (controller default 1.30); D52.
       CONTROL_MIN_WIDTH_MM: ${CONTROL_MIN_WIDTH_MM:-1.30}
       # Lever bounds for Auto, inside LEAM's ranges (default: LEAM's own; the Test bench can narrow them further); D54.

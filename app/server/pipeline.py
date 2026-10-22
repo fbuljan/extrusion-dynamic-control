@@ -134,7 +134,7 @@ def env_controller(environ=None):
     """Controller overrides from CONTROL_PIN_S (seconds an operator's change is left alone), CONTROL_MIN_LAYER (first
     layer Auto may act on), CONTROL_FLOOR_STEP_FACTOR (step multiple under the floor rules, 1-2), CONTROL_PERSIST_S and
     CONTROL_PERSIST_ESTIMATES (how long a deviation must last), CONTROL_KAPPA (share of the gap per command) and
-    CONTROL_MIN_WIDTH_MM (the walls limit) and the lever bounds CONTROL_{FLOW,SPEED,NOZZLE}_{MIN,MAX} (whole numbers
+    CONTROL_MIN_WIDTH_MM (the walls limit), CONTROL_SIGMA_FACTOR (the noise margin around the target) and the lever bounds CONTROL_{FLOW,SPEED,NOZZLE}_{MIN,MAX} (whole numbers
     inside LEAM's ranges); a bad value keeps that setting's default. The operator's settings on the Test bench go over
     these."""
     environ = os.environ if environ is None else environ
@@ -142,7 +142,8 @@ def env_controller(environ=None):
     for var, key, cast in (("CONTROL_PIN_S", "pin_s", float), ("CONTROL_MIN_LAYER", "min_layer", int),
                            ("CONTROL_FLOOR_STEP_FACTOR", "floor_step_factor", float),
                            ("CONTROL_PERSIST_S", "persist_s", float), ("CONTROL_PERSIST_ESTIMATES", "persist_estimates", int),
-                           ("CONTROL_KAPPA", "kappa", float), ("CONTROL_MIN_WIDTH_MM", "min_width_mm", float)):
+                           ("CONTROL_KAPPA", "kappa", float), ("CONTROL_MIN_WIDTH_MM", "min_width_mm", float),
+                           ("CONTROL_SIGMA_FACTOR", "sigma_factor", float)):
         raw = environ.get(var)
         if raw is None:
             continue

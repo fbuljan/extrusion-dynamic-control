@@ -147,6 +147,7 @@ Set `DATA_DIR` as above to keep runs out of the app folder: the default `app/.da
 | `CONTROL_PIN_S` | 300 | Seconds Auto leaves an operator's change alone (at least 60). A bad or non-finite value keeps the default |
 | `CONTROL_MIN_LAYER` | 6 | First layer Auto may act on (at least 1) |
 | `CONTROL_FLOOR_STEP_FACTOR` | 1.0 | Step multiple for a floor-rules widening step below 1.30 mm, 1–2 (D48) |
+| `CONTROL_SIGMA_FACTOR` | 2 | Auto also holds while the average is within this many sigmas of its noise from the target; the device runs 1 so the operator's zone governs (D57) |
 | `CONTROL_PERSIST_S`, `CONTROL_PERSIST_ESTIMATES`, `CONTROL_KAPPA` | 10, 5, 0.5 | How long and over how many estimates a deviation must last, and the share of the gap one command closes (D51; the device runs 5, 3, 0.7) |
 | `CONTROL_{FLOW,SPEED,NOZZLE}_{MIN,MAX}` | LEAM's: 0/200, 10/200, 190/250 | Auto's lever bounds; the Test bench narrows them further (D54; the device runs nozzle max 220) |
 | `CONTROL_MIN_WIDTH_MM` | 1.30 | The walls limit: below it the alarm shows and the floor rules act (D52; the device runs 1.45) |
