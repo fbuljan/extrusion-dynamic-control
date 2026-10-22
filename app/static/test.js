@@ -751,7 +751,7 @@ function renderModel() {
   $("#model-note").textContent = [
     `Model expects ${fmt(m.width_mm, 2)} mm at these settings${isNum(gap) ? `; measured ${signed(gap, 2)} from that` : ""}.`,
     dead.includes("flow") ? "Flow barely moves the width here: the model thinks the hotend is at its melt limit, so more filament doesn't widen the bead." : "",
-    "Auto picks the cheapest move, one lever or two, that closes enough of the gap (cost flow 1, speed 3, nozzle 10, more near a limit); the nozzle counts at least +0.025 mm per +5 °C, whatever the model says.",
+    "Auto picks the cheapest move, one lever or two, that closes enough of the gap (cost flow 1, speed 3, nozzle 10, more near a limit); the nozzle counts at least +0.025 mm per +5 °C and speed +0.025 mm per −10 %, whatever the model says; a lever that keeps stepping one way without reaching the target (Steps in a row) stops.",
   ].filter(Boolean).join(" ");
 }
 
@@ -889,6 +889,8 @@ const SETTINGS = [
     why: "Auto acts from this layer on" },
   { key: "floor_step_factor", name: "Walls step", short: "walls step", unit: "×", min: 1, max: 2, step: 0.1,
     why: "below the walls limit, Auto's steps may be this many times bigger" },
+  { key: "max_run_steps", name: "Steps in a row", short: "in a row", unit: "", min: 2, max: 20, step: 1,
+    why: "Auto stops a lever after this many steps one way that don't reach the target" },
 ];
 const RANGES = LEVERS.map(l => ({ op: l.op, name: `${l.name}`, unit: l.unit, min: l.min, max: l.max }));
 const SETTING_BY_KEY = { ...Object.fromEntries(SETTINGS.map(s => [s.key, s])), min_width_mm: { short: "walls", unit: "mm" },

@@ -1238,6 +1238,20 @@ def test_lever_with_less_than_30_percent_of_the_predicted_effect_is_dropped():
     assert all(c["operation"] != "flow_percent" for c in d.candidates)
 
 
+def test_a_long_run_one_way_stops_the_lever_even_when_noise_hides_its_weakness():
+    # Live 22 Oct: flow 103 -> 200 % in ten steps while the camera showed ~+0.05 mm, inside the ineffective check's
+    # noise allowance. From max_run_steps in a row without reaching the target the lever stops (D56).
+    r = Rig(StubPrinterModel(melt_width_mm=3.0), config=MODEL_ONLY, target=1.9).armed(1.30)
+    d, mm = r.act(1.30), 1.30
+    for i in range(5):
+        assert d.action["operation"] == "flow_percent", d.reason
+        mm += d.action and d.candidates[0]["predicted_change_mm"] * 0.5
+        d = r.settle(d, mm, rid=i + 1)
+    assert d.action is None
+    assert "flow stepped 5 times in a row without reaching the target: check the bead with a calliper" in d.reason
+    assert all(c["operation"] != "flow_percent" for c in d.candidates)
+
+
 def test_effective_lever_is_kept():
     r = Rig(StubPrinterModel(melt_width_mm=2.0), target=1.5).armed(1.20)
     d, mm = r.act(1.20), 1.20
@@ -1985,12 +1999,25 @@ def test_a_lever_near_its_bound_is_spared_for_one_in_the_middle():
     assert {d.action["operation"], (d.then or {}).get("operation")} != {"speed_override_percent", None}, d.reason
 
 
+def test_the_speed_floor_lets_auto_slow_down_where_the_model_rules_it_out():
+    # Live 22 Oct: nozzle 235 C, far from the melt limit, the model gave speed nothing and Auto pushed flow alone;
+    # 100 -> 60 % had widened the bead ~0.1 mm by calliper (D56).
+    printer = StubPrinterModel(melt_width_mm=2.4, softness_mm=0.01)
+    r = Rig(printer, config={**NOW, **D30}, target=1.6)
+    r.sp["flow_percent"] = 130.0
+    d = r.armed(1.45).act(1.45)
+    assert d.action == {"operation": "speed_override_percent", "value": 90}, d.reason
+    assert d.predicted_mm - 1.45 == pytest.approx(0.025)
+    view = r.c.sensitivity(r.sp, r.measured, r.context)["levers"]["speed_override_percent"]
+    assert view["down"] == pytest.approx(0.025), "the Test bench shows the floor too"
+
+
 def test_the_nozzle_floor_lets_auto_use_heat_where_the_model_rules_it_out():
     # Live 21 Oct 20:00: flow at its bound, the model's corner gave nozzle +5 C +0.00000003 mm; 215 -> 225 C had
     # widened the bead 0.10 mm (D54). The floor: at least min_gain_mm per C, so Auto heats instead of alarming.
     printer = StubPrinterModel(melt_width_mm=2.4, softness_mm=0.01)  # far from the melt limit: heat does nothing
     blind = Rig(printer, config={**NOW, **D30, **MODEL_ONLY}, target=1.6)
-    floored = Rig(printer, config={**NOW, **D30}, target=1.6)
+    floored = Rig(printer, config={**NOW, **D30, "min_gain_mm": {"nozzle_temperature_c": 0.005}}, target=1.6)
     for r in (blind, floored):
         r.sp["flow_percent"] = 130.0
         r.armed(1.45)

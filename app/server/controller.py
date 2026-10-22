@@ -398,6 +398,13 @@ class Controller:
                    f"{cfg['ineffective_ratio']:.0%} of the predicted change")
             for op in ops:
                 self._disabled[op] = why
+        # Noise can hide a lever the camera doesn't see (flow 103 -> 200 % on 22 Oct): a long run stops it regardless.
+        elif s["steps"] >= cfg["max_run_steps"] and self._target is not None and \
+                (self._target - estimate["mm"]) * direction > cfg["deadband_mm"]:
+            why = (f"alarm: {' + '.join(_name(op) for op in ops)} stepped {s['steps']} times in a row without reaching "
+                   f"the target: check the bead with a calliper")
+            for op in ops:
+                self._disabled[op] = why
 
     def _needs_views(self, estimate):
         """The print shows several views (each with its own camera offset) but this estimate holds only one."""
@@ -843,7 +850,7 @@ class Controller:
 
     def _floored(self, op, delta, change, rest=0.0):
         """A move's predicted change with `op` moved by `delta` held to at least min_gain_mm per unit on top of
-        `rest` (the change of the move's other levers): hotter or more is wider, the model's corner aside."""
+        `rest` (the change of the move's other levers), signed as configured, the model's corner aside."""
         floor = self.cfg["min_gain_mm"].get(op, 0.0) * delta
         return max(change, rest + floor) if floor > 0 else min(change, rest + floor) if floor < 0 else change
 

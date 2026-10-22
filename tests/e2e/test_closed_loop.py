@@ -45,6 +45,7 @@ WITHIN_MM = 0.10  # recovery is asserted "within 0.10 mm" of the target (true wi
 RECOVERED_WITHIN_S = 120
 # Limits written down here, not read from the controller's config, so a loosened config cannot pass its own test.
 ABSOLUTE_BOUNDS = {"flow_percent": (0, 200), "speed_override_percent": (10, 200), "nozzle_temperature_c": (190, 250)}  # LEAM's (D54)
+NOZZLE_FLOOR_ONLY = {"min_gain_mm": {"nozzle_temperature_c": 0.005}}
 D30 = {"levers": {"flow_percent": {"bounds": (70, 130)}, "speed_override_percent": {"bounds": (60, 100)}},
        "min_gain_mm": {}}  # the team's old bounds, and the model's own word on the nozzle
 ABSOLUTE_STEP = {"flow_percent": 10, "speed_override_percent": 10, "nozzle_temperature_c": 5}
@@ -404,7 +405,9 @@ def test_flow_efficiency_drop_is_recovered_without_oscillation(run, tmp_path, se
     assert len(sent_between(rig, 0, DISTURBED_AT_S)) <= 1, "at most one premature move (the views' offsets are unlearned)"
     assert recovers(t_back)
     assert line["reversals_per_5min"] <= 2
-    assert {r["request"]["correction"]["operation"] for r in rig.requests} == {"flow_percent"}
+    # speed's floor (D56) may add a step the simulated plant, the printer model itself, doesn't feel
+    ops = {r["request"]["correction"]["operation"] for r in rig.requests}
+    assert "flow_percent" in ops and ops <= {"flow_percent", "speed_override_percent"}
     assert out["flow_percent"].max() <= 130 and out["flow_percent"][-1] > 100
     assert safety_problems(out, rig) == []
     assert only_scalar_files(tmp_path)
@@ -441,7 +444,8 @@ def test_melt_limit_drop_with_an_unaware_model_stays_safe_and_alarms(run, seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_foreign_sender_holds_auto_and_pins_its_lever(run, seed):
     out, rig = run(seed=seed, events=[(DISTURBED_AT_S, flow_efficiency(0.8)),
-                                      (100, operator("speed_override_percent", 90))])
+                                      (100, operator("speed_override_percent", 90))],
+                   config=NOZZLE_FLOOR_ONLY)  # Auto's own speed steps would blur whose speed is pinned
     line, t_back = summary("foreign sender", seed, out, rig, DISTURBED_AT_S)
     assert rig.foreign_at is not None, "the foreign gateway result reached the controller"
     seen_s = (rig.foreign_at - T0_MS) / 1000
