@@ -490,10 +490,9 @@ body[data-link="offline"] :is(.scope, .loop, .events-box) { opacity: .5; }
   background: color-mix(in oklch, var(--bad) 13%, transparent); border: 1px solid color-mix(in oklch, var(--bad) 45%, transparent); }
 .loop-alarm[hidden] { display: none; }
 
-/* frame yield and dots */
+/* frame yield */
 .yield { font-size: 11px; color: var(--silk); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .yield b { color: var(--text); font-weight: 650; }
-.legend .k-dot { width: 6px; height: 6px; border-radius: 50%; background: color-mix(in oklch, var(--accent) 55%, transparent); }
 #w-frame { font: 11px var(--mono); color: var(--muted); }
 
 /* printer model */

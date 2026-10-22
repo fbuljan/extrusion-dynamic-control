@@ -103,14 +103,6 @@ const benchPlugin = {
   afterDatasetsDraw(chart, _, o) {
     const { ctx, chartArea: a, scales: { x, y } } = chart;
     ctx.save();
-    if (o.dots?.length) {  // one dot per measured frame: what the average line is made of
-      ctx.fillStyle = tint(C.accent, 55);
-      for (const d of o.dots) {
-        const px = x.getPixelForValue(d.t_ms), py = y.getPixelForValue(d.mm);
-        if (px < a.left || px > a.right || py < a.top || py > a.bottom) continue;
-        ctx.beginPath(); ctx.arc(px, py, 2.1, 0, 2 * Math.PI); ctx.fill();
-      }
-    }
     ctx.font = `600 10.5px ${tok("--mono")}`;
     const rowsRight = [-Infinity, -Infinity, -Infinity];
     for (const m of o.marks || []) {
@@ -236,12 +228,7 @@ function redraw() {
   const floorMm = wallsMm();
   walls.data = isNum(floorMm) ? [...pts(r => (isNum(r.min_width_mm) ? r.min_width_mm : floorMm)), { x: now, y: floorMm }] : [];
   // Keep the zone, the target and the walls line in view, and a little room around the width.
-  const dots = frames.filter(f => isNum(f.mm) && f.t_ms >= t0);
   const ys = [...width.data, ...zMin.data, ...zMax.data].map(p => p.y).filter(isNum);
-  if (dots.length > 4) {  // the dots' 5th-95th percentile: a stray frame must not squash the plot
-    const sorted = dots.map(d => d.mm).sort((p, q) => p - q);
-    ys.push(sorted[Math.floor(sorted.length * 0.05)], sorted[Math.floor(sorted.length * 0.95)]);
-  }
   ys.push(...walls.data.map(p => p.y).filter(isNum));
   const lo = ys.length ? Math.min(...ys) : 1.2, hi = ys.length ? Math.max(...ys) : 1.8;
   const pad = Math.max(0.05, (hi - lo) * 0.12);
@@ -261,7 +248,6 @@ function redraw() {
     Object.assign(ch.options.scales.x, { min: t0, max: now });
     ch.options.plugins.bench.lanes = lanes;
     ch.options.plugins.bench.marks = marks;
-    ch.options.plugins.bench.dots = ch === widthChart ? dots : null;
     ch.update("none");
   }
   $("#win-label").textContent = `last ${windowMin} min`;
