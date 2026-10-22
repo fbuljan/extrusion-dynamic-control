@@ -108,29 +108,3 @@ class CameraModel:
         """Lowest knee over the profile's views: no estimate shows a real width above it."""
         knees = [gp["knee"] for gp in self.groups.values() if math.isfinite(gp["knee"])]
         return min(knees) if knees else None
-
-
-class MarginCameraModel:
-    """A camera model whose widths all read `margin_mm` narrower (D55): the operator's numbers stay the nominal ones while
-    the real bead is kept that much wider, a safety margin against under-reading. Everything else is the wrapped model's."""
-
-    def __init__(self, model, margin_mm):
-        self._model, self.margin_mm = model, float(margin_mm)
-
-    def __getattr__(self, name):
-        return getattr(self._model, name)
-
-    def real_mm(self, width_px, group, nozzle_c, speed_mm_s):
-        out = self._model.real_mm(width_px, group, nozzle_c, speed_mm_s)
-        return None if out is None else (out[0] - self.margin_mm, out[1])
-
-    def ir_px(self, real_mm, group, nozzle_c, speed_mm_s):
-        return self._model.ir_px(None if real_mm is None else real_mm + self.margin_mm, group, nozzle_c, speed_mm_s)
-
-    def knee_mm(self, group):
-        knee = self._model.knee_mm(group)
-        return None if knee is None else knee - self.margin_mm
-
-    def ceiling_mm(self):
-        ceiling = self._model.ceiling_mm()
-        return None if ceiling is None else ceiling - self.margin_mm

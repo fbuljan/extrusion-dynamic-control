@@ -44,8 +44,6 @@ services:
       CONTROL_NOZZLE_MAX: ${CONTROL_NOZZLE_MAX:-250}
       # Averaging window of the displayed width in s (the controller keeps its own 25 s); D51.
       DISPLAY_WINDOW_S: ${DISPLAY_WINDOW_S:-15}
-      # Safety margin in mm (0-0.5): every width reads this much narrower, so Auto keeps the real bead this much wider; D55.
-      WIDTH_MARGIN_MM: ${WIDTH_MARGIN_MM:-0}
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}

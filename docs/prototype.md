@@ -150,7 +150,6 @@ Set `DATA_DIR` as above to keep runs out of the app folder: the default `app/.da
 | `CONTROL_PERSIST_S`, `CONTROL_PERSIST_ESTIMATES`, `CONTROL_KAPPA` | 10, 5, 0.5 | How long and over how many estimates a deviation must last, and the share of the gap one command closes (D51; the device runs 5, 3, 0.7) |
 | `CONTROL_{FLOW,SPEED,NOZZLE}_{MIN,MAX}` | LEAM's: 0/200, 10/200, 190/250 | Auto's lever bounds; the Test bench narrows them further (D54; the device runs nozzle max 220) |
 | `CONTROL_MIN_WIDTH_MM` | 1.30 | The walls limit: below it the alarm shows and the floor rules act (D52; the device runs 1.45) |
-| `WIDTH_MARGIN_MM` | 0 | Safety margin (0-0.5 mm): every width reads this much narrower, so Auto keeps the real bead that much wider; shown on the Test bench (D55; the demo device runs 0.2) |
 | `DISPLAY_WINDOW_S` | 15 | Averaging window of the displayed width; the controller keeps 25 s (D51) |
 | `MODELS_DIR` | `app/models` | Folder with `geometry.json`, `camera_model.json`, `printer_model.json`. A missing file is a "no model" state, not a crash |
 | `DATA_DIR` | `app/.data` | `control.json` (target), `prototype.db`, `settings.json`. The image uses `/cfg-data` |

@@ -176,7 +176,7 @@ def real_bridge(monkeypatch, clock, on_publish):
 class Sim:
     def __init__(self, tmp_path, monkeypatch, target=1.35, auto=False, send=True, bridge="fake", results=None,
                  camera="stub", printer="stub", config=None, extractor="fake", control=None, store=None, gate=None,
-                 geometry=None, extractor_cfg=None, settings=None):
+                 geometry=None, extractor_cfg=None):
         self.clock = Clock()
         if send:
             monkeypatch.setenv("CONTROL_SEND_ENABLED", "1")
@@ -205,7 +205,7 @@ class Sim:
         self.pipeline = Pipeline(self.bridge, self.control, self.store, camera_model=self.camera,
                                  printer_model=StubPrinterModel() if printer == "stub" else printer,
                                  controller_config=config, extractor=self.extractor, clock_ms=self.clock,
-                                 emit=self.emitted.append, geometry=geometry, settings=settings)
+                                 emit=self.emitted.append, geometry=geometry)
         self.bridge.hooks.append(self.pipeline.on_message)
         if target is not None:  # as the app sets it: stamped with the camera model it was set under
             self.control.update({"target_mm": target}, stamp=self.pipeline.target_stamp("typed"))
@@ -1411,8 +1411,7 @@ def test_pipeline_health_is_served_read_only_and_scalar(app):
     assert body["models"] == {"geometry": None, "camera_model": None, "printer_model": None}
     assert body["clock_offset_ms"] is None and body["clock_alarm"] is None and body["gate_open"] is False
     assert {"sent", "send_refused", "send_failed", "send_uncertain"} <= set(body["stats"])
-    assert body["settings"] == {"first_layer_mm": 0.7, "layer_mm": 0.5, "line_width_mm": 1.5, "display_window_s": 15.0,
-                                "width_margin_mm": 0.0}
+    assert body["settings"] == {"first_layer_mm": 0.7, "layer_mm": 0.5, "line_width_mm": 1.5, "display_window_s": 15.0}
 
     def scalars(v):
         return all(scalars(x) for x in v.values()) if isinstance(v, dict) else \
@@ -1636,39 +1635,3 @@ def test_env_settings_reads_the_display_window():
     from server.pipeline import env_settings
     assert env_settings({"DISPLAY_WINDOW_S": "10"}) == {"display_window_s": 10.0}
     assert env_settings({"DISPLAY_WINDOW_S": "0"}) == {} and env_settings({"DISPLAY_WINDOW_S": "x"}) == {}
-
-
-def test_the_width_margin_reads_every_width_narrower_and_binds_the_target_to_it(sim):
-    # D55: with a 0.2 mm margin every width reads 0.2 narrower, so a typed 1.35 holds the real bead at 1.55
-    plain, margin = sim(auto=False), sim(auto=False, settings={"width_margin_mm": 0.2})
-    for s in (plain, margin):
-        s.run(8)
-    a, b = plain.pipeline.trace()["rows"][-1], margin.pipeline.trace()["rows"][-1]
-    assert a["mm"] - b["mm"] == pytest.approx(0.2, abs=1e-6)
-    assert a["model"]["width_mm"] - b["model"]["width_mm"] == pytest.approx(0.2, abs=1e-6)
-    assert [x["mm"] for x in plain.pipeline.trace()["samples"]][-1] - \
-        [x["mm"] for x in margin.pipeline.trace()["samples"]][-1] == pytest.approx(0.2, abs=1e-6)
-    assert margin.pipeline.limits()["width_margin_mm"] == 0.2
-    stamp = margin.pipeline.target_stamp("typed")
-    assert stamp["camera_model"].endswith("+margin0.20")
-    assert margin.pipeline.target_problem(1.35, plain.pipeline.target_stamp("typed")) is not None, \
-        "a target typed without the margin meant another real width: set it again"
-    assert margin.pipeline.target_problem(1.35, stamp) is None
-
-
-def test_the_margin_camera_model_shifts_widths_both_ways():
-    from server.camera_model import MarginCameraModel
-    cam = StubCameraModel(g=0.0, s=0.0)
-    shifted = MarginCameraModel(cam, 0.2)
-    mm, sigma = cam.real_mm(3.0, "1", 220.0, 20.0)
-    assert shifted.real_mm(3.0, "1", 220.0, 20.0) == (pytest.approx(mm - 0.2), sigma)
-    assert shifted.ir_px(mm - 0.2, "1", 220.0, 20.0) == pytest.approx(cam.ir_px(mm, "1", 220.0, 20.0))
-    assert shifted.version == cam.version and shifted.ceiling_mm() == cam.ceiling_mm()  # no ceiling stays none
-
-
-def test_env_settings_take_a_width_margin_up_to_half_a_millimetre():
-    from server.pipeline import env_settings
-    assert env_settings({"WIDTH_MARGIN_MM": "0.2"}) == {"width_margin_mm": 0.2}
-    assert env_settings({"WIDTH_MARGIN_MM": "0"}) == {"width_margin_mm": 0.0}, "the compose default, no warning"
-    for bad in ("0.6", "-0.1", "x"):
-        assert env_settings({"WIDTH_MARGIN_MM": bad}) == {}, bad
